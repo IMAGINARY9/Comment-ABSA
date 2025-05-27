@@ -1,0 +1,65 @@
+# DeBERTa configuration for Aspect Term Extraction (ATE)
+model:
+  name: "microsoft/deberta-v3-base"
+  task: "token_classification"
+  num_labels: 5  # B-ASP, I-ASP, B-OP, I-OP, O
+  max_length: 128
+  dropout: 0.1
+
+# LoRA configuration for efficient fine-tuning
+lora:
+  use_lora: true
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+  target_modules: ["query_proj", "value_proj"]
+
+# Training parameters
+training:
+  batch_size: 16
+  learning_rate: 5e-5
+  num_epochs: 10
+  warmup_steps: 500
+  weight_decay: 0.01
+  save_steps: 500
+  eval_steps: 250
+  logging_steps: 100
+  gradient_accumulation_steps: 1
+
+# Data parameters
+data:
+  train_size: 0.8
+  val_size: 0.1
+  test_size: 0.1
+  text_column: "text"
+  labels_column: "labels"
+  dataset_format: "bio"  # BIO, BILOU
+  max_seq_length: 128
+
+# Label mapping
+labels:
+  B-ASP: 0
+  I-ASP: 1
+  B-OP: 2
+  I-OP: 3
+  O: 4
+
+# Class weights for imbalanced data
+class_weights:
+  B-ASP: 2.0
+  I-ASP: 2.0
+  B-OP: 1.5
+  I-OP: 1.5
+  O: 1.0
+
+# Evaluation
+evaluation:
+  metrics: ["precision", "recall", "f1", "accuracy"]
+  return_entity_level_metrics: true
+
+# Paths
+paths:
+  data_dir: "./data"
+  model_dir: "./models/ate"
+  log_dir: "./logs/ate"
+  output_dir: "./outputs/ate"

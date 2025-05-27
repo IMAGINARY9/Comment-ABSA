@@ -1,0 +1,55 @@
+# End-to-end ABSA configuration using BERT
+model:
+  name: "bert-base-uncased"
+  task: "absa_end_to_end"
+  num_aspect_labels: 8  # Based on SemEval categories
+  num_sentiment_labels: 3
+  max_length: 128
+  dropout: 0.1
+
+# Multi-task learning
+multitask:
+  aspect_weight: 0.5
+  sentiment_weight: 0.5
+  joint_loss: true
+
+# Training parameters
+training:
+  batch_size: 16
+  learning_rate: 5e-5
+  num_epochs: 8
+  warmup_steps: 300
+  weight_decay: 0.01
+  save_steps: 500
+  eval_steps: 250
+
+# Data parameters
+data:
+  train_size: 0.8
+  val_size: 0.1
+  test_size: 0.1
+  text_column: "text"
+  aspects_column: "aspects"
+  sentiments_column: "sentiments"
+  max_aspects_per_text: 5
+
+# Aspect categories (SemEval-like)
+aspect_categories:
+  food: 0
+  service: 1
+  price: 2
+  ambience: 3
+  menu: 4
+  place: 5
+  staff: 6
+  miscellaneous: 7
+
+# Evaluation
+evaluation:
+  metrics: ["aspect_f1", "sentiment_f1", "joint_f1", "exact_match"]
+  
+# Paths
+paths:
+  data_dir: "./data"
+  model_dir: "./models/end_to_end"
+  log_dir: "./logs/end_to_end"

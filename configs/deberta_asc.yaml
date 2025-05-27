@@ -1,0 +1,60 @@
+# DeBERTa configuration for Aspect Sentiment Classification (ASC)
+model:
+  name: "microsoft/deberta-v3-base"
+  task: "sequence_classification"
+  num_labels: 3  # positive, negative, neutral
+  max_length: 256
+  dropout: 0.1
+
+# LoRA configuration
+lora:
+  use_lora: true
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+  target_modules: ["query_proj", "value_proj", "key_proj"]
+
+# Training parameters
+training:
+  batch_size: 16
+  learning_rate: 2e-5
+  num_epochs: 5
+  warmup_steps: 200
+  weight_decay: 0.01
+  save_steps: 500
+  eval_steps: 250
+  logging_steps: 50
+
+# Data parameters - ASC specific format
+data:
+  train_size: 0.8
+  val_size: 0.1
+  test_size: 0.1
+  text_column: "text"
+  aspect_column: "aspect"
+  sentiment_column: "sentiment"
+  input_format: "aspect_sentence"  # "Aspect: {aspect}. Sentence: {text}"
+  
+# Sentiment mapping
+sentiments:
+  positive: 2
+  neutral: 1
+  negative: 0
+
+# Class weights (sentiment classes often imbalanced)
+class_weights:
+  negative: 1.2
+  neutral: 0.8
+  positive: 1.0
+
+# Evaluation
+evaluation:
+  metrics: ["accuracy", "f1", "precision", "recall"]
+  average: "weighted"
+
+# Paths
+paths:
+  data_dir: "./data"
+  model_dir: "./models/asc"
+  log_dir: "./logs/asc"
+  output_dir: "./outputs/asc"
