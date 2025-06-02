@@ -44,10 +44,10 @@ Write-Host "Activating virtual environment..." -ForegroundColor Yellow
 & ".\venv\Scripts\Activate.ps1"
 
 Write-Host ""
-Write-Host "Upgrading pip..." -ForegroundColor Yellow
-python -m pip install --upgrade pip
+Write-Host "Upgrading pip, setuptools, and wheel..." -ForegroundColor Yellow
+python -m pip install --upgrade pip setuptools wheel
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: Failed to upgrade pip" -ForegroundColor Yellow
+    Write-Host "WARNING: Failed to upgrade pip, setuptools, or wheel" -ForegroundColor Yellow
 }
 
 Write-Host ""
@@ -60,11 +60,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "Installing project in development mode..." -ForegroundColor Yellow
-pip install -e .
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: Failed to install project in development mode" -ForegroundColor Yellow
-}
+Write-Host "Installing Jupyter kernel for this environment..." -ForegroundColor Yellow
+python -m ipykernel install --user --name=comment-absa-env --display-name="Python (Comment ABSA)"
+Write-Host "Jupyter kernel installed" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "Creating required directories..." -ForegroundColor Yellow
@@ -87,7 +85,15 @@ $directories = @(
     "logs\training\end2end",
     "reports\figures",
     "visualizations\plots",
-    "visualizations\analysis"
+    "visualizations\analysis",
+    "data",
+    "models",
+    "logs",
+    "outputs",
+    "reports",
+    "notebooks",
+    "visualizations",
+    "cache"
 )
 
 foreach ($dir in $directories) {
@@ -97,25 +103,37 @@ foreach ($dir in $directories) {
     }
 }
 
+# Add .pth file for PYTHONPATH
+$sitePackagesDir = Join-Path -Path ".\venv\Lib\site-packages" -ChildPath "comment_absa.pth"
+$projectPath = (Get-Item -Path ".").FullName
+$projectPath | Out-File -FilePath $sitePackagesDir -Encoding ascii
+Write-Host "Created .pth file for automatic Python path configuration" -ForegroundColor Green
+
 Write-Host ""
 Write-Host "Downloading NLTK data..." -ForegroundColor Yellow
-python -c "import nltk; nltk.download('punkt', quiet=True); nltk.download('stopwords', quiet=True); nltk.download('vader_lexicon', quiet=True); nltk.download('averaged_perceptron_tagger', quiet=True); print('NLTK data downloaded successfully!')"
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: Failed to download NLTK data" -ForegroundColor Yellow
+$nltkDownloads = @("punkt", "stopwords", "vader_lexicon", "wordnet", "averaged_perceptron_tagger")
+foreach ($corpus in $nltkDownloads) {
+    python -c "import nltk; nltk.download('$corpus', quiet=True)"
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Downloaded NLTK corpus: $corpus" -ForegroundColor Green
+    } else {
+        Write-Host "Warning: Failed to download NLTK corpus: $corpus" -ForegroundColor Yellow
+    }
+}
+
+Write-Host ""
+Write-Host "Downloading pre-trained DeBERTa model..." -ForegroundColor Yellow
+python -c "from transformers import AutoModel, AutoTokenizer; AutoModel.from_pretrained('microsoft/deberta-v3-base'); AutoTokenizer.from_pretrained('microsoft/deberta-v3-base')"
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "Downloaded DeBERTa model" -ForegroundColor Green
+} else {
+    Write-Host "Warning: Failed to download DeBERTa model" -ForegroundColor Yellow
 }
 
 Write-Host ""
 Write-Host "========================================"
 Write-Host "  Setup completed successfully!" -ForegroundColor Green
 Write-Host "========================================"
-Write-Host ""
-Write-Host "To activate the environment in the future, run:" -ForegroundColor Cyan
-Write-Host "  .\activate.bat" -ForegroundColor White
-Write-Host ""
-Write-Host "To start training, run:" -ForegroundColor Cyan
-Write-Host "  python scripts\train.py --task ate" -ForegroundColor White
-Write-Host "  python scripts\train.py --task asc" -ForegroundColor White  
-Write-Host "  python scripts\train.py --task end2end" -ForegroundColor White
-Write-Host ""
-
-Read-Host "Press Enter to continue"
+Write-Host "To activate the environment in the future, run: .\activate.bat" -ForegroundColor Cyan
+Write-Host "For Jupyter, run: jupyter notebook" -ForegroundColor Cyan
+Write-Host "If you encounter import errors, ensure the venv is activated and PYTHONPATH is set." -ForegroundColor Yellow

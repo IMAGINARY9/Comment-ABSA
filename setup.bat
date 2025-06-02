@@ -46,6 +46,9 @@ if errorlevel 1 (
     echo WARNING: Failed to upgrade pip
 )
 
+REM Upgrade pip, setuptools, and wheel
+python -m pip install --upgrade pip setuptools wheel
+
 echo.
 echo Installing project dependencies...
 pip install -r requirements.txt
@@ -53,6 +56,19 @@ if errorlevel 1 (
     echo ERROR: Failed to install dependencies
     pause
     exit /b 1
+)
+
+REM Install dependencies
+if exist requirements.txt (
+    echo Installing dependencies from requirements.txt...
+    pip install -r requirements.txt
+    if errorlevel 1 (
+        echo ERROR: Failed to install dependencies
+        pause
+        exit /b 1
+    )
+) else (
+    echo Warning: requirements.txt not found
 )
 
 echo.
@@ -82,11 +98,35 @@ if not exist "reports\figures" mkdir reports\figures
 if not exist "visualizations\plots" mkdir visualizations\plots
 if not exist "visualizations\analysis" mkdir visualizations\analysis
 
+REM Install Jupyter kernel for this environment
+python -m ipykernel install --user --name=comment-absa-env --display-name="Python (Comment ABSA)"
+
+REM Create necessary directories (expanded)
+for %%d in (data models logs outputs reports notebooks visualizations cache) do (
+    if not exist %%d (
+        mkdir %%d
+        echo Created directory: %%d
+    )
+)
+
+REM Add .pth file for PYTHONPATH
+if exist venv\Lib\site-packages (
+    for /f %%i in ('cd') do echo %%i > venv\Lib\site-packages\comment_absa.pth
+    echo Created .pth file for automatic Python path configuration
+)
+
 echo.
 echo Downloading NLTK data...
-python -c "import nltk; nltk.download('punkt', quiet=True); nltk.download('stopwords', quiet=True); nltk.download('vader_lexicon', quiet=True); nltk.download('averaged_perceptron_tagger', quiet=True); print('NLTK data downloaded successfully!')"
+python -c "import nltk; [nltk.download(x, quiet=True) for x in ['punkt','stopwords','vader_lexicon','wordnet','averaged_perceptron_tagger']]"
 if errorlevel 1 (
     echo WARNING: Failed to download NLTK data
+)
+
+echo.
+echo Downloading pre-trained transformer model (DeBERTa)...
+python -c "from transformers import AutoModel, AutoTokenizer; AutoModel.from_pretrained('microsoft/deberta-v3-base'); AutoTokenizer.from_pretrained('microsoft/deberta-v3-base')"
+if errorlevel 1 (
+    echo WARNING: Failed to download pre-trained transformer model
 )
 
 echo.

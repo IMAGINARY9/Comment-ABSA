@@ -494,7 +494,63 @@ class ABSAPreprocessor:
         }
         
         return report
+    
+    def load_ate_data(self, data_dir, train_size=None, val_size=None, test_size=None):
+        """
+        Load BIO-tagged data for ATE from splits.
+        Returns: train_data, val_data, test_data (as torch Dataset)
+        """
+        import pandas as pd
+        from torch.utils.data import Dataset
+        class SimpleATEDataset(Dataset):
+            def __init__(self, df):
+                self.tokens = df['tokens'].tolist()
+                self.bio_tags = df['bio_tags'].tolist()
+                self.texts = df['clean_text'].tolist()
+            def __len__(self):
+                return len(self.tokens)
+            def __getitem__(self, idx):
+                return {
+                    'tokens': self.tokens[idx],
+                    'bio_tags': self.bio_tags[idx],
+                    'text': self.texts[idx]
+                }
+        train_df = pd.read_csv(f"{data_dir}/train.csv")
+        val_df = pd.read_csv(f"{data_dir}/val.csv")
+        test_df = pd.read_csv(f"{data_dir}/test.csv")
+        return SimpleATEDataset(train_df), SimpleATEDataset(val_df), SimpleATEDataset(test_df)
 
+    def load_asc_data(self, data_dir, train_size=None, val_size=None, test_size=None):
+        """
+        Load ASC aspect-sentiment pairs from splits.
+        Returns: train_data, val_data, test_data (as torch Dataset)
+        """
+        import pandas as pd
+        from torch.utils.data import Dataset
+        class SimpleASCDataset(Dataset):
+            def __init__(self, df):
+                self.inputs = df['input_text'].tolist() if 'input_text' in df else df['text'].tolist()
+                self.aspects = df['aspect'].tolist() if 'aspect' in df else [None]*len(df)
+                self.sentiments = df['sentiment'].tolist() if 'sentiment' in df else [None]*len(df)
+            def __len__(self):
+                return len(self.inputs)
+            def __getitem__(self, idx):
+                return {
+                    'input_text': self.inputs[idx],
+                    'aspect': self.aspects[idx],
+                    'sentiment': self.sentiments[idx]
+                }
+        train_df = pd.read_csv(f"{data_dir}/asc_pairs.csv")
+        val_df = pd.read_csv(f"{data_dir}/asc_pairs.csv") # fallback if no split
+        test_df = pd.read_csv(f"{data_dir}/asc_pairs.csv")
+        return SimpleASCDataset(train_df), SimpleASCDataset(val_df), SimpleASCDataset(test_df)
+
+    def load_end_to_end_data(self, data_dir, train_size=None, val_size=None, test_size=None):
+        """
+        Load end-to-end ABSA data (for future use, fallback to ATE loader).
+        """
+        return self.load_ate_data(data_dir, train_size, val_size, test_size)
+        
 
 class ABSADataset(Dataset):
     """

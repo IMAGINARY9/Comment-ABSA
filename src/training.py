@@ -27,8 +27,8 @@ import seaborn as sns
 from collections import defaultdict
 import time
 
-from .models import DeBERTaATE, DeBERTaASC, BERTForABSA, EndToEndABSA
-from .preprocessing import ABSADataset, ABSADataLoader
+from models import DeBERTaATE, DeBERTaASC, BERTForABSA, EndToEndABSA
+from preprocessing import ABSADataset, ABSADataLoader
 
 
 class ABSATrainer:

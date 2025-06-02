@@ -16,7 +16,7 @@ from transformers import (
     DebertaV2Model, DebertaV2Config,
     BertModel, BertConfig
 )
-from torchcrf import CRF
+from TorchCRF import CRF
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 import logging
