@@ -23,7 +23,7 @@ training:
   weight_decay: 0.01
   save_steps: 500
   eval_steps: 250
-  logging_steps: 50
+  logging_steps: 200
 
 # Data parameters - ASC specific format
 data:

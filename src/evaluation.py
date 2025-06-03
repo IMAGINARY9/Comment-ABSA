@@ -26,7 +26,7 @@ from collections import Counter, defaultdict
 import re
 from tqdm import tqdm
 
-from .models import DeBERTaATE, DeBERTaASC, ABSAPredictor
+from models import DeBERTaATE, DeBERTaASC, ABSAPredictor
 
 
 class ABSAEvaluator:
@@ -128,12 +128,22 @@ class ABSAEvaluator:
         )
         
         # Per-class metrics
-        class_report = classification_report(
-            all_labels, all_predictions,
-            target_names=self.label_names,
-            output_dict=True,
-            zero_division=0
-        )
+        unique_labels = sorted(set(list(all_labels) + list(all_predictions)))
+        if len(unique_labels) == len(self.label_names):
+            class_report = classification_report(
+                all_labels, all_predictions,
+                target_names=self.label_names,
+                labels=unique_labels,
+                output_dict=True,
+                zero_division=0
+            )
+        else:
+            class_report = classification_report(
+                all_labels, all_predictions,
+                labels=unique_labels,
+                output_dict=True,
+                zero_division=0
+            )
         
         # Confusion matrix
         cm = confusion_matrix(all_labels, all_predictions)

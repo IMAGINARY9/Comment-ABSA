@@ -3,6 +3,9 @@
 Comprehensive training script for Aspect-Based Sentiment Analysis (ABSA).
 Supports ATE (Aspect Term Extraction), ASC (Aspect Sentiment Classification),
 and end-to-end ABSA training.
+
+usage:
+    python train.py --config config.yaml --data_dir data/absa --output_dir outputs/absa
 """
 
 import argparse
@@ -12,6 +15,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
+import datetime
 
 import torch
 import torch.nn as nn
@@ -29,7 +33,7 @@ from models import (
     DeBERTaATE, DeBERTaASC, BERTForABSA, EndToEndABSA, 
     BiLSTMCRF, ABSAPredictor
 )
-from preprocessing import ABSAPreprocessor
+from preprocessing import ABSAPreprocessor, collate_end2end_absa_batch
 from training import ATETrainer, ASCTrainer, MultiTaskABSATrainer
 from evaluation import ABSAEvaluator
 from data_utils import load_data_from_config
@@ -72,15 +76,30 @@ def prepare_data(config: Dict[str, Any], data_dir: str) -> Tuple[DataLoader, Dat
     """Prepare data loaders for training, validation, and testing."""
     logging.info("Preparing data...")
     
+    # Map config['model']['task'] to ABSAPreprocessor's 'task' argument
+    task_map = {
+        "token_classification": "ate",
+        "sequence_classification": "asc",
+        "absa_end_to_end": "end_to_end"
+    }
     preprocessor = ABSAPreprocessor(
-        model_name=config['model']['name'],
-        max_length=config['model']['max_length'],
-        task=config['model']['task']
+        task=task_map.get(config['model']['task'], "ate"),
+        tokenizer_name=config['model']['name']
     )
     
     # Load and preprocess data based on task
     task = config['model']['task']
-    
+    domain = None
+    # Patch: infer domain for end-to-end multitask
+    if task == "absa_end_to_end":
+        # Try config['data']['dataset'] or infer from data_dir
+        if 'dataset' in config.get('data', {}):
+            domain = config['data']['dataset']
+        else:
+            # Use last part of data_dir if it matches a known domain
+            domain_candidate = os.path.basename(os.path.normpath(data_dir))
+            if domain_candidate in ["laptops", "restaurants", "tweets"]:
+                domain = domain_candidate
     if task == "token_classification":
         # ATE task - load BIO tagged data
         train_data, val_data, test_data = preprocessor.load_ate_data(
@@ -98,12 +117,13 @@ def prepare_data(config: Dict[str, Any], data_dir: str) -> Tuple[DataLoader, Dat
             test_size=config['data']['test_size']
         )
     elif task == "absa_end_to_end":
-        # End-to-end ABSA
+        # End-to-end ABSA (now with domain support)
         train_data, val_data, test_data = preprocessor.load_end_to_end_data(
             data_dir=data_dir,
             train_size=config['data']['train_size'],
             val_size=config['data']['val_size'],
-            test_size=config['data']['test_size']
+            test_size=config['data']['test_size'],
+            domain=domain
         )
     else:
         raise ValueError(f"Unsupported task: {task}")
@@ -116,7 +136,8 @@ def prepare_data(config: Dict[str, Any], data_dir: str) -> Tuple[DataLoader, Dat
         batch_size=batch_size, 
         shuffle=True,
         num_workers=4 if torch.cuda.is_available() else 0,
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=True if torch.cuda.is_available() else False,
+        collate_fn=collate_end2end_absa_batch if task == "absa_end_to_end" else None
     )
     
     val_loader = DataLoader(
@@ -124,7 +145,8 @@ def prepare_data(config: Dict[str, Any], data_dir: str) -> Tuple[DataLoader, Dat
         batch_size=batch_size, 
         shuffle=False,
         num_workers=4 if torch.cuda.is_available() else 0,
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=True if torch.cuda.is_available() else False,
+        collate_fn=collate_end2end_absa_batch if task == "absa_end_to_end" else None
     )
     
     test_loader = DataLoader(
@@ -132,7 +154,8 @@ def prepare_data(config: Dict[str, Any], data_dir: str) -> Tuple[DataLoader, Dat
         batch_size=batch_size, 
         shuffle=False,
         num_workers=4 if torch.cuda.is_available() else 0,
-        pin_memory=True if torch.cuda.is_available() else False
+        pin_memory=True if torch.cuda.is_available() else False,
+        collate_fn=collate_end2end_absa_batch if task == "absa_end_to_end" else None
     )
     
     logging.info(f"Data loaded - Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
@@ -149,37 +172,15 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     
     if task == "token_classification":
         # ATE model
-        model = DeBERTaATE(
-            model_name=model_name,
-            num_labels=config['model']['num_labels'],
-            dropout=config['model'].get('dropout', 0.1),
-            use_lora=config.get('lora', {}).get('use_lora', False),
-            lora_config=config.get('lora', {})
-        )
+        model = DeBERTaATE(config)
     elif task == "sequence_classification":
         # ASC model
-        model = DeBERTaASC(
-            model_name=model_name,
-            num_labels=config['model']['num_labels'],
-            dropout=config['model'].get('dropout', 0.1),
-            use_lora=config.get('lora', {}).get('use_lora', False),
-            lora_config=config.get('lora', {})
-        )
+        model = DeBERTaASC(config)
     elif task == "absa_end_to_end":
         if "bert" in model_name.lower():
-            model = BERTForABSA(
-                model_name=model_name,
-                num_aspect_labels=config['model']['num_aspect_labels'],
-                num_sentiment_labels=config['model']['num_sentiment_labels'],
-                dropout=config['model'].get('dropout', 0.1)
-            )
+            model = BERTForABSA(config)
         else:
-            model = EndToEndABSA(
-                model_name=model_name,
-                num_aspect_labels=config['model']['num_aspect_labels'],
-                num_sentiment_labels=config['model']['num_sentiment_labels'],
-                dropout=config['model'].get('dropout', 0.1)
-            )
+            model = EndToEndABSA(config)
     else:
         raise ValueError(f"Unsupported task: {task}")
     
@@ -194,44 +195,17 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     return model
 
 
-def create_trainer(config: Dict[str, Any], model: nn.Module, device: torch.device):
+def create_trainer(config: Dict[str, Any], model: nn.Module, use_wandb: bool = False):
     """Create the appropriate trainer based on task."""
     task = config['model']['task']
-    
     if task == "token_classification":
-        trainer = ATETrainer(
-            model=model,
-            device=device,
-            learning_rate=config['training']['learning_rate'],
-            weight_decay=config['training'].get('weight_decay', 0.01),
-            warmup_steps=config['training'].get('warmup_steps', 0),
-            class_weights=config.get('class_weights', {}),
-            gradient_accumulation_steps=config['training'].get('gradient_accumulation_steps', 1)
-        )
+        trainer = ATETrainer(model, config, use_wandb=use_wandb)
     elif task == "sequence_classification":
-        trainer = ASCTrainer(
-            model=model,
-            device=device,
-            learning_rate=config['training']['learning_rate'],
-            weight_decay=config['training'].get('weight_decay', 0.01),
-            warmup_steps=config['training'].get('warmup_steps', 0),
-            class_weights=config.get('class_weights', {}),
-            gradient_accumulation_steps=config['training'].get('gradient_accumulation_steps', 1)
-        )
+        trainer = ASCTrainer(model, config, use_wandb=use_wandb)
     elif task == "absa_end_to_end":
-        trainer = MultiTaskABSATrainer(
-            model=model,
-            device=device,
-            learning_rate=config['training']['learning_rate'],
-            weight_decay=config['training'].get('weight_decay', 0.01),
-            warmup_steps=config['training'].get('warmup_steps', 0),
-            aspect_weight=config.get('multitask', {}).get('aspect_weight', 0.5),
-            sentiment_weight=config.get('multitask', {}).get('sentiment_weight', 0.5),
-            gradient_accumulation_steps=config['training'].get('gradient_accumulation_steps', 1)
-        )
+        trainer = MultiTaskABSATrainer(model, config, use_wandb=use_wandb)
     else:
         raise ValueError(f"Unsupported task: {task}")
-    
     return trainer
 
 
@@ -254,14 +228,8 @@ def train_model(
     
     # Train the model
     history = trainer.train(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        num_epochs=num_epochs,
-        save_dir=output_dir,
-        save_steps=save_steps,
-        eval_steps=eval_steps,
-        logging_steps=logging_steps,
-        use_wandb=use_wandb
+        train_dataloader=train_loader,
+        val_dataloader=val_loader
     )
     
     # Save training history
@@ -286,30 +254,44 @@ def evaluate_model(
     
     evaluator = ABSAEvaluator(
         task=config['model']['task'],
-        label_names=list(config.get('labels', {}).keys()) if 'labels' in config else None,
-        output_dir=output_dir
+        label_names=list(config.get('labels', {}).keys()) if 'labels' in config else None
     )
     
     # Evaluate the model
-    results = evaluator.evaluate_model(
-        model=model,
-        test_loader=test_loader,
-        tokenizer=tokenizer
-    )
+    task = config['model']['task']
+    if task == "token_classification":
+        results = evaluator.evaluate_ate(
+            model=model,
+            dataloader=test_loader,
+            tokenizer=tokenizer
+        )
+    elif task == "sequence_classification":
+        results = evaluator.evaluate_asc(
+            model=model,
+            dataloader=test_loader
+        )
+    elif task == "absa_end_to_end":
+        results = evaluator.evaluate_end_to_end(
+            predictor=model,  # or ABSAPredictor if needed
+            test_texts=None,  # fill as needed
+            true_aspects=None,
+            true_sentiments=None
+        )
+    else:
+        raise ValueError(f"Unsupported task: {task}")
     
     # Generate comprehensive evaluation report
-    evaluation_results = evaluator.generate_evaluation_report(
-        results=results,
-        save_plots=True,
-        save_errors=True
+    evaluation_report = evaluator.generate_evaluation_report(
+        results=results
     )
-    
-    # Log key metrics
-    logging.info("Evaluation Results:")
-    for metric, value in evaluation_results.get('metrics', {}).items():
-        logging.info(f"  {metric}: {value:.4f}")
-    
-    return evaluation_results
+    logging.info("Evaluation Report:\n" + evaluation_report)
+    # Optionally, parse metrics from results for further use
+    evaluation_metrics = results.get('metrics', {}) if isinstance(results, dict) else {}
+    return {'report': evaluation_report, 'metrics': evaluation_metrics}
+
+
+def get_timestamp():
+    return datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 
 
 def main():
@@ -320,7 +302,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./outputs", help="Output directory")
     parser.add_argument("--wandb_project", type=str, default="absa-training", help="Wandb project name")
     parser.add_argument("--wandb_run_name", type=str, help="Wandb run name")
-    parser.add_argument("--no_wandb", action="store_true", help="Disable wandb logging")
+    parser.add_argument("--wandb", action="store_true", help="Enable wandb logging (default: off)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--log_level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
@@ -335,23 +317,49 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
         logging.info("Debug mode enabled")
     
+    # Add timestamp to output_dir if not already present
+    timestamp = get_timestamp()
+    # Compose a descriptive model_dir name: task_dataset_timestamp
+    task = None
+    dataset = None
+    if '--config' in sys.argv:
+        # Try to extract dataset/task from config if possible
+        # (config is loaded below, so we will update model_dir after loading config)
+        pass
+    if not args.output_dir.endswith(timestamp):
+        output_dir = os.path.join(args.output_dir, f"run_{timestamp}")
+    else:
+        output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+
     # Load configuration
     config = load_config(args.config)
     logging.info(f"Loaded config from {args.config}")
-    
+
     # Setup device
     device = setup_device()
-    
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
+
+    # Compose model_dir with task, dataset, and timestamp
+    task = config['model'].get('task', 'absa')
+    dataset = config.get('data', {}).get('dataset', os.path.basename(os.path.normpath(args.data_dir)))
+    # Shorten task for folder name
+    task_short = {'token_classification': 'ate', 'sequence_classification': 'asc', 'absa_end_to_end': 'end2end'}.get(task, task)
+    model_dir_name = f"{task_short}_{dataset}_{timestamp}"
+    model_dir = os.path.join('models', model_dir_name)
+    os.makedirs(model_dir, exist_ok=True)
+
+    # Update model_dir in config to use unique, descriptive path
+    if 'paths' not in config:
+        config['paths'] = {}
+    config['paths']['model_dir'] = model_dir
+
     # Save config to output directory
-    config_save_path = os.path.join(args.output_dir, "config.yaml")
+    config_save_path = os.path.join(output_dir, "config.yaml")
     with open(config_save_path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
     
     # Initialize wandb
-    use_wandb = not args.no_wandb
+    use_wandb = args.wandb
     if use_wandb:
         try:
             wandb.init(
@@ -373,7 +381,7 @@ def main():
         model = create_model(config, device)
         
         # Create trainer
-        trainer = create_trainer(config, model, device)
+        trainer = create_trainer(config, model, use_wandb)
         
         # Train model
         training_history = train_model(
@@ -381,15 +389,16 @@ def main():
             train_loader=train_loader,
             val_loader=val_loader,
             config=config,
-            output_dir=args.output_dir,
+            output_dir=output_dir,
             use_wandb=use_wandb
         )
         
         # Load best model for evaluation
-        best_model_path = os.path.join(args.output_dir, "best_model.pt")
+        best_model_path = os.path.join(config['paths']['model_dir'], "best_model.pt")
         if os.path.exists(best_model_path):
             logging.info("Loading best model for evaluation...")
-            model.load_state_dict(torch.load(best_model_path, map_location=device))
+            checkpoint = torch.load(best_model_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
         
         # Create tokenizer for evaluation
         tokenizer = AutoTokenizer.from_pretrained(config['model']['name'])
@@ -421,11 +430,11 @@ def main():
             }
         }
         
-        results_path = os.path.join(args.output_dir, "final_results.json")
+        results_path = os.path.join(output_dir, "final_results.json")
         with open(results_path, 'w') as f:
             json.dump(final_results, f, indent=2, default=str)
         
-        logging.info(f"Training completed successfully! Results saved to {args.output_dir}")
+        logging.info(f"Training completed successfully! Results saved to {output_dir}")
         
     except Exception as e:
         logging.error(f"Training failed: {str(e)}")

@@ -23,7 +23,7 @@ training:
   weight_decay: 0.01
   save_steps: 500
   eval_steps: 250
-  logging_steps: 100
+  logging_steps: 200
   gradient_accumulation_steps: 1
 
 # Data parameters

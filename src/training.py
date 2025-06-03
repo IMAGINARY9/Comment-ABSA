@@ -26,9 +26,17 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import defaultdict
 import time
+import os
 
 from models import DeBERTaATE, DeBERTaASC, BERTForABSA, EndToEndABSA
 from preprocessing import ABSADataset, ABSADataLoader
+
+
+# Utility function to filter batch for model
+def filter_model_inputs(batch):
+    # Only keep keys that are accepted by the model (input_ids, attention_mask, labels, aspect_labels, sentiment_labels)
+    allowed = {'input_ids', 'attention_mask', 'labels', 'aspect_labels', 'sentiment_labels'}
+    return {k: v for k, v in batch.items() if k in allowed}
 
 
 class ABSATrainer:
@@ -79,11 +87,17 @@ class ABSATrainer:
     
     def setup_logging(self):
         """Setup logging configuration."""
+        # Determine model type for log directory
+        model_type = self.config.get('model', {}).get('task', 'absa')
+        model_type_short = {'token_classification': 'ate', 'sequence_classification': 'asc', 'absa_end_to_end': 'end2end'}.get(model_type, model_type)
+        log_dir = os.path.join('logs', model_type_short)
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f'training_{int(time.time())}.log')
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(f'logs/training_{int(time.time())}.log'),
+                logging.FileHandler(log_path),
                 logging.StreamHandler()
             ]
         )
@@ -121,9 +135,13 @@ class ABSATrainer:
         
         self.optimizer = AdamW(
             optimizer_grouped_parameters,
-            lr=self.config['training']['learning_rate'],
+            lr=float(self.config['training']['learning_rate']),
             eps=1e-8
         )
+        # Also ensure weight_decay is float in optimizer_grouped_parameters
+        for group in optimizer_grouped_parameters:
+            if 'weight_decay' in group:
+                group['weight_decay'] = float(group['weight_decay'])
         
         # Scheduler
         num_training_steps = len(train_dataloader) * self.config['training']['num_epochs']
@@ -142,6 +160,11 @@ class ABSATrainer:
             metric: Current metric value
             is_best: Whether this is the best model so far
         """
+        # Ensure checkpoint directory exists
+        checkpoint_dir = self.config.get('paths', {}).get('model_dir', './models/ate')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch{epoch}.pt")
+        
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -152,12 +175,11 @@ class ABSATrainer:
         }
         
         # Save regular checkpoint
-        checkpoint_path = Path(self.config['paths']['model_dir']) / f'checkpoint_epoch_{epoch}.pt'
         torch.save(checkpoint, checkpoint_path)
         
         # Save best model
         if is_best:
-            best_path = Path(self.config['paths']['model_dir']) / 'best_model.pt'
+            best_path = os.path.join(checkpoint_dir, "best_model.pt")
             torch.save(checkpoint, best_path)
             self.logger.info(f"New best model saved with metric: {metric:.4f}")
     
@@ -201,7 +223,11 @@ class ABSATrainer:
             prefix: Metric prefix (train/val)
         """
         # Log to console
-        metric_str = " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
+        def format_metric(k, v):
+            if isinstance(v, (float, int)):
+                return f"{k}: {v:.4f}"
+            return f"{k}: {v}"
+        metric_str = " | ".join([format_metric(k, v) for k, v in metrics.items()])
         self.logger.info(f"Step {step} | {prefix} | {metric_str}")
         
         # Log to wandb
@@ -264,16 +290,11 @@ class ATETrainer(ABSATrainer):
         
         for batch_idx, batch in enumerate(progress_bar):
             # Move batch to device
-            input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
-            labels = batch['labels'].to(self.device)
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            batch = filter_model_inputs(batch)
             
             # Forward pass
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
+            outputs = self.model(**batch)
             
             loss = outputs['loss']
             logits = outputs['logits']
@@ -298,7 +319,7 @@ class ATETrainer(ABSATrainer):
             # Flatten predictions and labels for metric calculation
             if isinstance(predictions, list):
                 # CRF predictions
-                for pred_seq, label_seq, mask in zip(predictions, labels, attention_mask):
+                for pred_seq, label_seq, mask in zip(predictions, batch['labels'], batch['attention_mask']):
                     valid_length = mask.sum().item()
                     all_predictions.extend(pred_seq[:valid_length])
                     valid_labels = label_seq[:valid_length]
@@ -306,8 +327,8 @@ class ATETrainer(ABSATrainer):
                     all_labels.extend(valid_labels.cpu().numpy())
             else:
                 # Standard predictions
-                active_mask = attention_mask.view(-1) == 1
-                active_labels = labels.view(-1)[active_mask]
+                active_mask = batch['attention_mask'].view(-1) == 1
+                active_labels = batch['labels'].view(-1)[active_mask]
                 active_predictions = predictions.view(-1)[active_mask]
                 
                 # Filter out ignore_index
@@ -357,17 +378,10 @@ class ATETrainer(ABSATrainer):
         
         with torch.no_grad():
             for batch in tqdm(eval_dataloader, desc="Evaluating"):
-                # Move batch to device
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                labels = batch['labels'].to(self.device)
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                batch = filter_model_inputs(batch)
                 
-                # Forward pass
-                outputs = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels
-                )
+                outputs = self.model(**batch)
                 
                 loss = outputs['loss']
                 predictions = outputs['predictions']
@@ -377,7 +391,7 @@ class ATETrainer(ABSATrainer):
                 # Collect predictions and labels
                 if isinstance(predictions, list):
                     # CRF predictions
-                    for pred_seq, label_seq, mask in zip(predictions, labels, attention_mask):
+                    for pred_seq, label_seq, mask in zip(predictions, batch['labels'], batch['attention_mask']):
                         valid_length = mask.sum().item()
                         all_predictions.extend(pred_seq[:valid_length])
                         valid_labels = label_seq[:valid_length]
@@ -385,8 +399,8 @@ class ATETrainer(ABSATrainer):
                         all_labels.extend(valid_labels.cpu().numpy())
                 else:
                     # Standard predictions
-                    active_mask = attention_mask.view(-1) == 1
-                    active_labels = labels.view(-1)[active_mask]
+                    active_mask = batch['attention_mask'].view(-1) == 1
+                    active_labels = batch['labels'].view(-1)[active_mask]
                     active_predictions = predictions.view(-1)[active_mask]
                     
                     # Filter out ignore_index
@@ -402,12 +416,23 @@ class ATETrainer(ABSATrainer):
         )
         
         # Per-class metrics
-        class_report = classification_report(
-            all_labels, all_predictions,
-            target_names=self.label_names,
-            output_dict=True,
-            zero_division=0
-        )
+        unique_labels = sorted(set(list(all_labels) + list(all_predictions)))
+        # Only use target_names if the number matches
+        if len(unique_labels) == len(self.label_names):
+            class_report = classification_report(
+                all_labels, all_predictions,
+                target_names=self.label_names,
+                labels=unique_labels,
+                output_dict=True,
+                zero_division=0
+            )
+        else:
+            class_report = classification_report(
+                all_labels, all_predictions,
+                labels=unique_labels,
+                output_dict=True,
+                zero_division=0
+            )
         
         metrics = {
             'loss': avg_loss,
@@ -462,9 +487,13 @@ class ATETrainer(ABSATrainer):
                 self.save_checkpoint(epoch, train_f1, is_best)
         
         self.logger.info("Training completed!")
-        
-        if self.use_wandb:
-            wandb.finish()
+        # Return training history (at least best_val_score)
+        history = {
+            'best_val_score': getattr(self, 'best_metric', None),
+            'train_metrics': getattr(self, 'train_metrics', None),
+            'val_metrics': getattr(self, 'val_metrics', None)
+        }
+        return history
 
 
 class ASCTrainer(ABSATrainer):
@@ -499,16 +528,11 @@ class ASCTrainer(ABSATrainer):
         
         for batch_idx, batch in enumerate(progress_bar):
             # Move batch to device
-            input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
-            labels = batch['labels'].to(self.device)
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            batch = filter_model_inputs(batch)
             
             # Forward pass
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
+            outputs = self.model(**batch)
             
             loss = outputs['loss']
             predictions = outputs['predictions']
@@ -529,7 +553,7 @@ class ASCTrainer(ABSATrainer):
             # Collect metrics
             total_loss += loss.item()
             all_predictions.extend(predictions.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            all_labels.extend(batch['labels'].cpu().numpy())
             
             # Update progress bar
             progress_bar.set_postfix({'loss': loss.item()})
@@ -574,17 +598,10 @@ class ASCTrainer(ABSATrainer):
         
         with torch.no_grad():
             for batch in tqdm(eval_dataloader, desc="Evaluating"):
-                # Move batch to device
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                labels = batch['labels'].to(self.device)
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                batch = filter_model_inputs(batch)
                 
-                # Forward pass
-                outputs = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels
-                )
+                outputs = self.model(**batch)
                 
                 loss = outputs['loss']
                 logits = outputs['logits']
@@ -595,7 +612,7 @@ class ASCTrainer(ABSATrainer):
                 # Collect predictions and labels
                 probabilities = torch.softmax(logits, dim=-1)
                 all_predictions.extend(predictions.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
+                all_labels.extend(batch['labels'].cpu().numpy())
                 all_probabilities.extend(probabilities.cpu().numpy())
         
         # Calculate metrics
@@ -667,9 +684,13 @@ class ASCTrainer(ABSATrainer):
                 self.save_checkpoint(epoch, train_f1, is_best)
         
         self.logger.info("Training completed!")
-        
-        if self.use_wandb:
-            wandb.finish()
+        # Return training history (at least best_val_score)
+        history = {
+            'best_val_score': getattr(self, 'best_metric', None),
+            'train_metrics': getattr(self, 'train_metrics', None),
+            'val_metrics': getattr(self, 'val_metrics', None)
+        }
+        return history
 
 
 class MultiTaskABSATrainer(ABSATrainer):
@@ -706,20 +727,16 @@ class MultiTaskABSATrainer(ABSATrainer):
         
         for batch_idx, batch in enumerate(progress_bar):
             # Move batch to device
-            input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
-            aspect_labels_batch = batch['aspect_labels'].to(self.device)
-            sentiment_labels_batch = batch['sentiment_labels'].to(self.device)
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            batch = filter_model_inputs(batch)
             
             # Forward pass
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                aspect_labels=aspect_labels_batch,
-                sentiment_labels=sentiment_labels_batch
-            )
+            outputs = self.model(**batch)
             
             loss = outputs['loss']
+            if loss is None:
+                self.logger.warning(f"Batch {batch_idx}: Loss is None, skipping backward and optimizer step.")
+                continue
             
             # Backward pass
             loss.backward()
@@ -742,14 +759,14 @@ class MultiTaskABSATrainer(ABSATrainer):
             sentiment_preds = outputs['sentiment_predictions']
             
             aspect_predictions.extend(aspect_preds.cpu().numpy().flatten())
-            aspect_labels.extend(aspect_labels_batch.cpu().numpy().flatten())
+            aspect_labels.extend(batch['aspect_labels'].cpu().numpy().flatten())
             
             # Only collect sentiment metrics for aspects that are present
-            for i in range(aspect_labels_batch.size(0)):
-                for j in range(aspect_labels_batch.size(1)):
-                    if aspect_labels_batch[i, j] == 1:  # Aspect is present
+            for i in range(batch['aspect_labels'].size(0)):
+                for j in range(batch['aspect_labels'].size(1)):
+                    if batch['aspect_labels'][i, j] == 1:  # Aspect is present
                         sentiment_predictions.append(sentiment_preds[i, j].item())
-                        sentiment_labels.append(sentiment_labels_batch[i, j].item())
+                        sentiment_labels.append(batch['sentiment_labels'][i, j].item())
             
             # Update progress bar
             progress_bar.set_postfix({'loss': loss.item()})
@@ -785,6 +802,64 @@ class MultiTaskABSATrainer(ABSATrainer):
             'overall_f1': (aspect_f1 + sentiment_f1) / 2
         }
         
+        return metrics
+    
+    def evaluate(self, eval_dataloader: DataLoader) -> dict:
+        """Evaluate model on validation/test set for multitask ABSA."""
+        self.model.eval()
+        total_loss = 0
+        aspect_predictions = []
+        aspect_labels = []
+        sentiment_predictions = []
+        sentiment_labels = []
+        num_batches = 0
+        with torch.no_grad():
+            for batch in tqdm(eval_dataloader, desc="Evaluating"):
+                # Defensive: skip batch if required keys are missing
+                if 'aspect_labels' not in batch or 'sentiment_labels' not in batch:
+                    self.logger.warning("Batch missing 'aspect_labels' or 'sentiment_labels', skipping.")
+                    continue
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                batch = filter_model_inputs(batch)
+                outputs = self.model(**batch)
+                loss = outputs['loss']
+                if loss is not None:
+                    total_loss += loss.item()
+                aspect_preds = outputs['aspect_predictions']
+                sentiment_preds = outputs['sentiment_predictions']
+                aspect_predictions.extend(aspect_preds.cpu().numpy().flatten())
+                aspect_labels.extend(batch['aspect_labels'].cpu().numpy().flatten())
+                for i in range(batch['aspect_labels'].size(0)):
+                    for j in range(batch['aspect_labels'].size(1)):
+                        if batch['aspect_labels'][i, j] == 1:
+                            sentiment_predictions.append(sentiment_preds[i, j].item())
+                            sentiment_labels.append(batch['sentiment_labels'][i, j].item())
+                num_batches += 1
+        avg_loss = total_loss / max(num_batches, 1)
+        from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+        aspect_accuracy = accuracy_score(aspect_labels, aspect_predictions) if aspect_labels else 0.0
+        aspect_precision, aspect_recall, aspect_f1, _ = precision_recall_fscore_support(
+            aspect_labels, aspect_predictions, average='weighted', zero_division=0
+        ) if aspect_labels else (0.0, 0.0, 0.0, None)
+        if sentiment_predictions:
+            sentiment_accuracy = accuracy_score(sentiment_labels, sentiment_predictions)
+            sentiment_precision, sentiment_recall, sentiment_f1, _ = precision_recall_fscore_support(
+                sentiment_labels, sentiment_predictions, average='weighted', zero_division=0
+            )
+        else:
+            sentiment_accuracy = sentiment_precision = sentiment_recall = sentiment_f1 = 0.0
+        metrics = {
+            'loss': avg_loss,
+            'aspect_accuracy': aspect_accuracy,
+            'aspect_precision': aspect_precision,
+            'aspect_recall': aspect_recall,
+            'aspect_f1': aspect_f1,
+            'sentiment_accuracy': sentiment_accuracy,
+            'sentiment_precision': sentiment_precision,
+            'sentiment_recall': sentiment_recall,
+            'sentiment_f1': sentiment_f1,
+            'overall_f1': (aspect_f1 + sentiment_f1) / 2 if aspect_f1 and sentiment_f1 else 0.0
+        }
         return metrics
     
     def train(self, train_dataloader: DataLoader, val_dataloader: DataLoader = None):
@@ -824,6 +899,10 @@ class MultiTaskABSATrainer(ABSATrainer):
                     break
         
         self.logger.info("Training completed!")
-        
-        if self.use_wandb:
-            wandb.finish()
+        # Return training history (at least best_val_score)
+        history = {
+            'best_val_score': getattr(self, 'best_metric', None),
+            'train_metrics': getattr(self, 'train_metrics', None),
+            'val_metrics': getattr(self, 'val_metrics', None)
+        }
+        return history

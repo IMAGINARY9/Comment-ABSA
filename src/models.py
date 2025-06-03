@@ -40,16 +40,17 @@ class DeBERTaATE(nn.Module):
         
         # Load DeBERTa model
         model_name = config['model']['name']
-        self.deberta_config = AutoConfig.from_pretrained(model_name)
-        self.deberta = AutoModel.from_pretrained(model_name, config=self.deberta_config)
-        
-        # Apply LoRA if specified
         if config.get('lora', {}).get('use_lora', False):
+            from transformers import AutoModelForTokenClassification
+            self.deberta_config = AutoConfig.from_pretrained(model_name, num_labels=self.num_labels)
+            self.deberta = AutoModelForTokenClassification.from_pretrained(model_name, config=self.deberta_config)
             self._apply_lora(config['lora'])
-        
-        # Classification head
+            self.classifier = None  # Use built-in classifier
+        else:
+            self.deberta_config = AutoConfig.from_pretrained(model_name)
+            self.deberta = AutoModel.from_pretrained(model_name, config=self.deberta_config)
+            self.classifier = nn.Linear(self.deberta.config.hidden_size, self.num_labels)
         self.dropout = nn.Dropout(config['model']['dropout'])
-        self.classifier = nn.Linear(self.deberta.config.hidden_size, self.num_labels)
         
         # Optional CRF layer for sequence labeling
         self.use_crf = config.get('use_crf', False)
@@ -82,33 +83,38 @@ class DeBERTaATE(nn.Module):
     
     def forward(self, input_ids, attention_mask=None, labels=None):
         """Forward pass."""
-        outputs = self.deberta(
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        )
-        
-        sequence_output = outputs.last_hidden_state
-        sequence_output = self.dropout(sequence_output)
-        logits = self.classifier(sequence_output)
-        
-        loss = None
-        if labels is not None:
-            if self.use_crf:
-                # CRF loss
-                loss = -self.crf(logits, labels, mask=attention_mask.bool())
-            else:
-                # Standard cross-entropy loss
-                loss_fct = nn.CrossEntropyLoss(
-                    weight=self.class_weights,
-                    ignore_index=-100
-                )
-                active_loss = attention_mask.view(-1) == 1
-                active_logits = logits.view(-1, self.num_labels)
-                active_labels = torch.where(
-                    active_loss, labels.view(-1), torch.tensor(-100).type_as(labels)
-                )
-                loss = loss_fct(active_logits, active_labels)
-        
+        if self.classifier is None:
+            # LoRA/PEFT: use built-in classifier and pass labels
+            outputs = self.deberta(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
+            )
+            logits = outputs.logits
+            loss = outputs.loss if labels is not None else None
+        else:
+            outputs = self.deberta(
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            )
+            sequence_output = outputs.last_hidden_state
+            sequence_output = self.dropout(sequence_output)
+            logits = self.classifier(sequence_output)
+            loss = None
+            if labels is not None:
+                if self.use_crf:
+                    loss = -self.crf(logits, labels, mask=attention_mask.bool())
+                else:
+                    loss_fct = nn.CrossEntropyLoss(
+                        weight=self.class_weights,
+                        ignore_index=-100
+                    )
+                    active_loss = attention_mask.view(-1) == 1
+                    active_logits = logits.view(-1, self.num_labels)
+                    active_labels = torch.where(
+                        active_loss, labels.view(-1), torch.tensor(-100).type_as(labels)
+                    )
+                    loss = loss_fct(active_logits, active_labels)
         return {
             'loss': loss,
             'logits': logits,
@@ -257,22 +263,19 @@ class BERTForABSA(nn.Module):
         self.bert = AutoModel.from_pretrained(model_name, config=self.bert_config)
         
         # Task-specific parameters
-        self.max_aspects = config.get('max_aspects', 5)
-        self.num_sentiment_classes = config.get('num_sentiment_classes', 3)
+        self.num_aspect_categories = config['model'].get('num_aspect_labels', 8)
+        self.num_sentiment_classes = config['model'].get('num_sentiment_labels', 3)
         
         # Multi-head approach for multiple aspects
         self.dropout = nn.Dropout(config['model']['dropout'])
         
-        # Aspect extraction heads (one for each possible aspect)
-        self.aspect_classifiers = nn.ModuleList([
-            nn.Linear(self.bert.config.hidden_size, 2)  # Has aspect / No aspect
-            for _ in range(self.max_aspects)
-        ])
+        # Single multi-label aspect head
+        self.aspect_classifier = nn.Linear(self.bert.config.hidden_size, self.num_aspect_categories)
         
-        # Sentiment classification heads (one for each aspect)
+        # Sentiment heads: one per aspect category
         self.sentiment_classifiers = nn.ModuleList([
             nn.Linear(self.bert.config.hidden_size, self.num_sentiment_classes)
-            for _ in range(self.max_aspects)
+            for _ in range(self.num_aspect_categories)
         ])
         
         # Attention mechanism for aspect-specific representations
@@ -282,76 +285,68 @@ class BERTForABSA(nn.Module):
             dropout=config['model']['dropout']
         )
     
-    def forward(self, input_ids, attention_mask=None, aspect_labels=None, sentiment_labels=None):
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None, labels=None, aspect_labels=None, sentiment_labels=None, **kwargs):
         """Forward pass for joint aspect-sentiment prediction."""
         outputs = self.bert(
             input_ids=input_ids,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids
         )
-        
         sequence_output = outputs.last_hidden_state  # [batch, seq_len, hidden]
-        pooled_output = outputs.last_hidden_state[:, 0]  # [CLS] token
-        
+        pooled_output = outputs.last_hidden_state[:, 0]  # [CLS] token, [batch, hidden]
         batch_size = sequence_output.size(0)
-        
-        # Apply attention to get aspect-aware representations
-        attended_output, _ = self.aspect_attention(
-            pooled_output.unsqueeze(1),  # Query: [CLS] token
-            sequence_output.transpose(0, 1),  # Key: all tokens  
-            sequence_output.transpose(0, 1)   # Value: all tokens
-        )
-        attended_output = attended_output.squeeze(1)  # [batch, hidden]
-        
+        # Multihead attention
+        query = pooled_output.unsqueeze(0)  # [1, batch, hidden]
+        key = value = sequence_output.transpose(0, 1)  # [seq_len, batch, hidden]
+        attended_output, _ = self.aspect_attention(query, key, value)
+        attended_output = attended_output.squeeze(0)  # [batch, hidden]
         attended_output = self.dropout(attended_output)
-        
-        # Predict for each aspect head
-        aspect_logits = []
+        # Aspect prediction
+        aspect_logits = self.aspect_classifier(attended_output)  # [batch, num_aspect_categories]
+        # Sentiment prediction for each aspect category
         sentiment_logits = []
-        
-        for i in range(self.max_aspects):
-            # Aspect presence prediction
-            aspect_logit = self.aspect_classifiers[i](attended_output)
-            aspect_logits.append(aspect_logit)
-            
-            # Sentiment prediction (conditional on aspect presence)
-            sentiment_logit = self.sentiment_classifiers[i](attended_output)
+        for i in range(self.num_aspect_categories):
+            sentiment_logit = self.sentiment_classifiers[i](attended_output)  # [batch, num_sentiment_classes]
             sentiment_logits.append(sentiment_logit)
-        
-        aspect_logits = torch.stack(aspect_logits, dim=1)  # [batch, max_aspects, 2]
-        sentiment_logits = torch.stack(sentiment_logits, dim=1)  # [batch, max_aspects, 3]
-        
-        # Calculate loss if labels provided
-        total_loss = None
-        if aspect_labels is not None and sentiment_labels is not None:
-            aspect_loss_fct = nn.CrossEntropyLoss()
-            sentiment_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            
-            aspect_loss = 0
-            sentiment_loss = 0
-            
-            for i in range(self.max_aspects):
-                # Aspect presence loss
-                aspect_loss += aspect_loss_fct(
-                    aspect_logits[:, i], aspect_labels[:, i]
-                )
-                
-                # Sentiment loss (only for present aspects)
-                valid_mask = aspect_labels[:, i] == 1  # Aspect is present
-                if valid_mask.any():
-                    sentiment_loss += sentiment_loss_fct(
-                        sentiment_logits[:, i][valid_mask], 
-                        sentiment_labels[:, i][valid_mask]
-                    )
-            
-            total_loss = aspect_loss + sentiment_loss
-        
-        return {
-            'loss': total_loss,
+        sentiment_logits = torch.stack(sentiment_logits, dim=1)  # [batch, num_aspect_categories, num_sentiment_classes]
+        output = {
             'aspect_logits': aspect_logits,
             'sentiment_logits': sentiment_logits,
-            'aspect_predictions': torch.argmax(aspect_logits, dim=-1),
+            'aspect_predictions': (torch.sigmoid(aspect_logits) > 0.5).long(),
             'sentiment_predictions': torch.argmax(sentiment_logits, dim=-1)
         }
+        # Optionally compute loss if labels are provided
+        loss = None
+        if labels is not None:
+            if isinstance(labels, dict):
+                aspect_labels = labels.get('aspect_labels', None)
+                sentiment_labels = labels.get('sentiment_labels', None)
+            else:
+                aspect_labels = aspect_labels
+                sentiment_labels = sentiment_labels
+        if aspect_labels is not None and sentiment_labels is not None:
+            loss_fct_aspect = nn.BCEWithLogitsLoss()
+            # Add label smoothing to sentiment loss
+            loss_fct_sentiment = nn.CrossEntropyLoss(label_smoothing=0.1)
+            # aspect_labels: [batch, num_aspect_categories] (float, 0/1)
+            aspect_loss = loss_fct_aspect(aspect_logits, aspect_labels.float())
+            # sentiment_labels: [batch, num_aspect_categories] (int, 0/1/2 or -100 for not present)
+            # Only compute sentiment loss for present aspects
+            active_sentiment_loss = []
+            for i in range(self.num_aspect_categories):
+                mask = (aspect_labels[:, i] == 1)
+                if mask.sum() == 0:
+                    continue
+                logits_i = sentiment_logits[mask, i, :]
+                labels_i = sentiment_labels[mask, i]
+                active_sentiment_loss.append(loss_fct_sentiment(logits_i, labels_i))
+            if active_sentiment_loss:
+                sentiment_loss = torch.stack(active_sentiment_loss).mean()
+            else:
+                sentiment_loss = torch.tensor(0.0, device=aspect_logits.device)
+            loss = aspect_loss + sentiment_loss
+        output['loss'] = loss
+        return output
 
 
 class EndToEndABSA(nn.Module):

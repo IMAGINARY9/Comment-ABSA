@@ -510,46 +510,163 @@ class ABSAPreprocessor:
             def __len__(self):
                 return len(self.tokens)
             def __getitem__(self, idx):
+                # Convert string representation of lists to actual lists
+                import ast
+                tokens = ast.literal_eval(self.tokens[idx]) if isinstance(self.tokens[idx], str) else self.tokens[idx]
+                bio_tags = ast.literal_eval(self.bio_tags[idx]) if isinstance(self.bio_tags[idx], str) else self.bio_tags[idx]
+                # Tokenize and align for model input
+                encoding = self_outer.tokenizer(
+                    tokens,
+                    is_split_into_words=True,
+                    truncation=True,
+                    max_length=128,
+                    padding='max_length',
+                    return_tensors='pt'
+                )
+                # Map BIO tags to label ids
+                label_map = {'B-ASP': 0, 'I-ASP': 1, 'B-OP': 2, 'I-OP': 3, 'O': 4}
+                labels = [label_map.get(tag, 4) for tag in bio_tags]
+                labels = labels[:128] + [-100] * (128 - len(labels)) if len(labels) < 128 else labels[:128]
                 return {
-                    'tokens': self.tokens[idx],
-                    'bio_tags': self.bio_tags[idx],
-                    'text': self.texts[idx]
+                    'input_ids': encoding['input_ids'].squeeze(0),
+                    'attention_mask': encoding['attention_mask'].squeeze(0),
+                    'labels': torch.tensor(labels)
                 }
+        # Patch to access tokenizer from outer class
+        self_outer = self
         train_df = pd.read_csv(f"{data_dir}/train.csv")
         val_df = pd.read_csv(f"{data_dir}/val.csv")
         test_df = pd.read_csv(f"{data_dir}/test.csv")
         return SimpleATEDataset(train_df), SimpleATEDataset(val_df), SimpleATEDataset(test_df)
 
-    def load_asc_data(self, data_dir, train_size=None, val_size=None, test_size=None):
+    def load_asc_data(self, data_dir, train_size=None, val_size=None, test_size=None, max_length=None):
         """
         Load ASC aspect-sentiment pairs from splits.
         Returns: train_data, val_data, test_data (as torch Dataset)
         """
         import pandas as pd
         from torch.utils.data import Dataset
-        class SimpleASCDataset(Dataset):
-            def __init__(self, df):
-                self.inputs = df['input_text'].tolist() if 'input_text' in df else df['text'].tolist()
-                self.aspects = df['aspect'].tolist() if 'aspect' in df else [None]*len(df)
-                self.sentiments = df['sentiment'].tolist() if 'sentiment' in df else [None]*len(df)
-            def __len__(self):
-                return len(self.inputs)
-            def __getitem__(self, idx):
-                return {
-                    'input_text': self.inputs[idx],
-                    'aspect': self.aspects[idx],
-                    'sentiment': self.sentiments[idx]
-                }
+        # Load CSVs
         train_df = pd.read_csv(f"{data_dir}/asc_pairs.csv")
         val_df = pd.read_csv(f"{data_dir}/asc_pairs.csv") # fallback if no split
         test_df = pd.read_csv(f"{data_dir}/asc_pairs.csv")
-        return SimpleASCDataset(train_df), SimpleASCDataset(val_df), SimpleASCDataset(test_df)
 
-    def load_end_to_end_data(self, data_dir, train_size=None, val_size=None, test_size=None):
+        # Determine max_length
+        if max_length is None:
+            max_length = 256  # fallback default
+        # Try to get from config if available
+        if hasattr(self, 'max_length') and self.max_length is not None:
+            max_length = self.max_length
+
+        # Prepare data for ASC (tokenization, label mapping)
+        train_data = self.prepare_asc_data(
+            train_df['text'].tolist(),
+            train_df['aspect'].tolist(),
+            train_df['sentiment'].tolist(),
+            max_length=max_length
+        )
+        val_data = self.prepare_asc_data(
+            val_df['text'].tolist(),
+            val_df['aspect'].tolist(),
+            val_df['sentiment'].tolist(),
+            max_length=max_length
+        )
+        test_data = self.prepare_asc_data(
+            test_df['text'].tolist(),
+            test_df['aspect'].tolist(),
+            test_df['sentiment'].tolist(),
+            max_length=max_length
+        )
+        # Return as ABSADataset for correct __getitem__
+        return ABSADataset(train_data, task="asc"), ABSADataset(val_data, task="asc"), ABSADataset(test_data, task="asc")
+
+    def load_end_to_end_data(self, data_dir, train_size=None, val_size=None, test_size=None, max_length=None, domain=None):
         """
-        Load end-to-end ABSA data (for future use, fallback to ATE loader).
+        Load end-to-end ABSA data for multitask (aspect+sentiment) training.
+        Returns: train_data, val_data, test_data (as torch Dataset)
         """
-        return self.load_ate_data(data_dir, train_size, val_size, test_size)
+        import pandas as pd
+        from torch.utils.data import Dataset
+        aspect_cat_map = self.aspect_domains.get('restaurant', None)
+        # Try to get from config if available
+        if hasattr(self, 'aspect_categories'):
+            aspect_cat_map = self.aspect_categories
+        else:
+            # Fallback: use config from bert_end_to_end.yaml
+            aspect_cat_map = {
+                'food': 0, 'service': 1, 'price': 2, 'ambience': 3, 'menu': 4, 'place': 5, 'staff': 6, 'miscellaneous': 7
+            }
+        num_aspect_categories = len(aspect_cat_map)
+        num_sentiment_labels = 3  # negative, neutral, positive
+        if max_length is None:
+            max_length = 128
+        # Patch: support per-domain end2end splits, avoid double domain
+        split_dir = Path(data_dir)
+        if domain is not None:
+            if split_dir.name == domain:
+                split_dir = split_dir / 'end2end'
+            else:
+                split_dir = split_dir / domain / 'end2end'
+        else:
+            split_dir = split_dir / 'end2end'
+        train_df = pd.read_csv(split_dir / 'train.csv')
+        val_df = pd.read_csv(split_dir / 'val.csv')
+        test_df = pd.read_csv(split_dir / 'test.csv')
+        def parse_list(val):
+            if isinstance(val, str):
+                try:
+                    return eval(val)
+                except:
+                    return []
+            return val if isinstance(val, list) else []
+        class EndToEndABSADataset(Dataset):
+            def __init__(self, df, tokenizer, max_length, aspect_cat_map, num_sentiment_labels):
+                self.texts = df['text'].tolist()
+                self.aspects = df['aspects'].apply(parse_list).tolist()
+                self.sentiments = df['sentiments'].apply(parse_list).tolist()
+                self.tokenizer = tokenizer
+                self.max_length = max_length
+                self.aspect_cat_map = aspect_cat_map
+                self.num_aspect_categories = len(aspect_cat_map)
+                self.num_sentiment_labels = num_sentiment_labels
+            def __len__(self):
+                return len(self.texts)
+            def __getitem__(self, idx):
+                text = self.texts[idx]
+                aspects = self.aspects[idx]
+                sentiments = self.sentiments[idx]
+                encoding = self.tokenizer(
+                    text,
+                    truncation=True,
+                    padding='max_length',
+                    max_length=self.max_length,
+                    return_tensors='pt'
+                )
+                # aspect_labels: multi-hot vector [num_aspect_categories]
+                aspect_labels = torch.zeros(self.num_aspect_categories, dtype=torch.float)
+                sentiment_labels = torch.full((self.num_aspect_categories,), -100, dtype=torch.long)
+                for asp, sent in zip(aspects, sentiments):
+                    if asp in self.aspect_cat_map:
+                        idx_ = self.aspect_cat_map[asp]
+                        aspect_labels[idx_] = 1.0
+                        # Normalize sentiment
+                        norm_sent = 1  # default neutral
+                        s = str(sent).lower().strip()
+                        if s in ['negative', 'neg', '0', '0.0']:
+                            norm_sent = 0
+                        elif s in ['positive', 'pos', '2', '2.0', '1']:
+                            norm_sent = 2
+                        sentiment_labels[idx_] = norm_sent
+                return {
+                    'input_ids': encoding['input_ids'].squeeze(0),
+                    'attention_mask': encoding['attention_mask'].squeeze(0),
+                    'aspect_labels': aspect_labels,
+                    'sentiment_labels': sentiment_labels
+                }
+        train_data = EndToEndABSADataset(train_df, self.tokenizer, max_length, aspect_cat_map, num_sentiment_labels)
+        val_data = EndToEndABSADataset(val_df, self.tokenizer, max_length, aspect_cat_map, num_sentiment_labels)
+        test_data = EndToEndABSADataset(test_df, self.tokenizer, max_length, aspect_cat_map, num_sentiment_labels)
+        return train_data, val_data, test_data
         
 
 class ABSADataset(Dataset):
@@ -697,3 +814,16 @@ class ABSADataLoader:
             datasets['test'] = ABSADataset(test_data, task)
         
         return datasets
+
+def collate_end2end_absa_batch(batch):
+    """Collate function for end-to-end multitask ABSA batches."""
+    input_ids = torch.stack([item['input_ids'] for item in batch])
+    attention_mask = torch.stack([item['attention_mask'] for item in batch])
+    aspect_labels = torch.stack([item['aspect_labels'] for item in batch])
+    sentiment_labels = torch.stack([item['sentiment_labels'] for item in batch])
+    return {
+        'input_ids': input_ids,
+        'attention_mask': attention_mask,
+        'aspect_labels': aspect_labels,
+        'sentiment_labels': sentiment_labels
+    }

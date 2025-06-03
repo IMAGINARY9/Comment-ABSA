@@ -17,7 +17,6 @@ try {
 } catch {
     Write-Host "ERROR: Python is not installed or not in PATH" -ForegroundColor Red
     Write-Host "Please install Python 3.8+ and try again" -ForegroundColor Red
-    Read-Host "Press Enter to exit"
     exit 1
 }
 
@@ -29,7 +28,6 @@ if (!(Test-Path "venv")) {
     python -m venv venv
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: Failed to create virtual environment" -ForegroundColor Red
-        Read-Host "Press Enter to exit"
         exit 1
     }
     Write-Host "Virtual environment created successfully!" -ForegroundColor Green
@@ -55,7 +53,6 @@ Write-Host "Installing project dependencies..." -ForegroundColor Yellow
 pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Failed to install dependencies" -ForegroundColor Red
-    Read-Host "Press Enter to exit"
     exit 1
 }
 

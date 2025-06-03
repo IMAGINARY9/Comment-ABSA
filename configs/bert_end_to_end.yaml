@@ -9,19 +9,20 @@ model:
 
 # Multi-task learning
 multitask:
-  aspect_weight: 0.5
-  sentiment_weight: 0.5
+  aspect_weight: 0.4
+  sentiment_weight: 0.6
   joint_loss: true
 
 # Training parameters
 training:
   batch_size: 16
-  learning_rate: 5e-5
-  num_epochs: 8
-  warmup_steps: 300
+  learning_rate: 3e-5
+  num_epochs: 12
+  warmup_steps: 500
   weight_decay: 0.01
   save_steps: 500
   eval_steps: 250
+  logging_steps: 200
 
 # Data parameters
 data:
