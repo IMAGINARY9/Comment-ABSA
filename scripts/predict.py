@@ -141,19 +141,33 @@ def predict_single_text(model, tokenizer, text, config, ate_model=None, ate_toke
                 inputs.pop('token_type_ids')
             inputs = {k: v.to(device) for k, v in inputs.items()}
             outputs = model(**inputs)
-            aspect_logits = outputs['aspect_logits'].cpu()
-            sentiment_logits = outputs['sentiment_logits'].cpu()
+            # Robustly handle model outputs
+            aspect_logits = outputs.get('aspect_logits', None)
+            sentiment_logits = outputs.get('sentiment_logits', None)
+            if aspect_logits is None or sentiment_logits is None:
+                raise ValueError("Model output missing 'aspect_logits' or 'sentiment_logits'. Check model and config.")
             aspect_probs = torch.sigmoid(aspect_logits)
             aspect_threshold = config.get('aspect_threshold', 0.5)
-            aspect_indices = (aspect_probs > aspect_threshold).nonzero(as_tuple=True)[1]
+            # Get indices of aspects above threshold (batch dim = 1)
+            aspect_indices = (aspect_probs[0] > aspect_threshold).nonzero(as_tuple=True)[0].tolist()
             aspects = []
             aspect_map = config.get('aspect_categories', {})
-            aspect_names = [k for k, v in sorted(aspect_map.items(), key=lambda x: x[1])]
+            if isinstance(aspect_map, dict):
+                aspect_names = [k for k, v in sorted(aspect_map.items(), key=lambda x: x[1])]
+            else:
+                aspect_names = list(aspect_map) if aspect_map else [str(i) for i in range(aspect_probs.shape[1])]
+            sentiment_map = config.get('sentiments', ['negative', 'neutral', 'positive'])
             for idx in aspect_indices:
-                aspect_name = aspect_names[idx] if idx < len(aspect_names) else str(idx)
-                sentiment_idx = torch.argmax(sentiment_logits[0, idx]).item()
-                sentiment_map = config.get('sentiments', ['negative', 'neutral', 'positive'])
-                sentiment = sentiment_map[sentiment_idx] if sentiment_idx < len(sentiment_map) else str(sentiment_idx)
+                if idx < len(aspect_names):
+                    aspect_name = aspect_names[idx]
+                else:
+                    aspect_name = str(idx)
+                # Sentiment prediction for this aspect
+                if sentiment_logits.shape[1] > idx:
+                    sentiment_idx = torch.argmax(sentiment_logits[0, idx]).item()
+                    sentiment = sentiment_map[sentiment_idx] if sentiment_idx < len(sentiment_map) else str(sentiment_idx)
+                else:
+                    sentiment = 'unknown'
                 aspects.append((aspect_name, sentiment))
             result = {
                 'text': text,

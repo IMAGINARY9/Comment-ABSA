@@ -1,104 +1,138 @@
 # Aspect-Based Sentiment Analysis (ABSA) for Comments
 
-This project implements aspect-based sentiment analysis for comments, extracting aspects and their associated sentiments.
+A modular, robust, and extensible pipeline for Aspect-Based Sentiment Analysis (ABSA) on comment data, supporting Aspect Term Extraction (ATE), Aspect Sentiment Classification (ASC), and joint end-to-end (multitask) models. Built for research and practical deployment, with strong configuration, error handling, and reporting.
 
-## Overview
+---
 
-- **Task**: Extract aspect terms and classify sentiment for each aspect in comments
-- **Approach**: Pipeline (ATE + ASC) and end-to-end models using BERT/DeBERTa
-- **Challenges**: Multiple aspects per comment, implicit aspects, aspect-sentiment pairs
+## Features
+
+- **End-to-End ABSA**: Joint aspect extraction and sentiment classification in a single model, or as a pipeline.
+- **Modular Architecture**: Swap models, datasets, and configs easily. Supports BERT, DeBERTa, LoRA, and more.
+- **Config-Driven Workflow**: All training, evaluation, and prediction are controlled by YAML config files.
+- **Per-Domain Data Splits**: Robust handling of domain-specific datasets (e.g., laptops, restaurants, tweets).
+- **Advanced Logging & Reporting**: Model-type-specific logs, detailed evaluation reports, and visualizations.
+- **Error-Resistant**: Defensive coding for missing labels, batch alignment, and checkpoint loading.
+
+---
 
 ## Project Structure
 
 ```
 comment-absa/
-├── data/                    # ABSA datasets (SemEval, domain-specific)
-├── src/                     # Source code
-├── models/                  # Trained models and checkpoints
-├── notebooks/               # Jupyter notebooks for experiments
-├── configs/                 # Configuration files
-├── scripts/                 # Training and evaluation scripts
-├── references/              # Reference notebooks and papers
-├── logs/                    # Training logs
-├── reports/                 # Analysis reports and results
-├── visualizations/          # ABSA visualizations
-└── tests/                   # Unit tests
+├── data/                # Raw, preprocessed, and split datasets (per domain)
+├── src/                 # Source code (models, training, utils, preprocessing)
+├── scripts/             # Training, evaluation, and prediction scripts
+├── configs/             # YAML config files for all model types
+├── models/              # Saved checkpoints and best models
+├── logs/                # Training logs (per model type)
+├── reports/             # Evaluation reports and plots
+├── notebooks/           # Data cleaning, exploration, and reference notebooks
+├── outputs/             # Output configs and training histories
+├── visualizations/      # Analysis and plots
+├── tests/               # Unit tests
+└── requirements.txt     # Python dependencies
 ```
 
-## Key Features
+---
 
-1. **Aspect Term Extraction (ATE)**: Token classification for aspect identification
-2. **Aspect Sentiment Classification (ASC)**: Sentiment classification per aspect
-3. **End-to-End Models**: Joint aspect and sentiment prediction
-4. **Advanced Models**: DeBERTa with LoRA, BERT-based pipelines
-5. **Evaluation**: Comprehensive ABSA metrics
+## Architecture & Workflow
+
+### Supported Tasks
+- **Aspect Term Extraction (ATE)**: Sequence labeling to extract aspect terms.
+- **Aspect Sentiment Classification (ASC)**: Classify sentiment for each aspect.
+- **End-to-End ABSA**: Jointly extract aspects and classify their sentiment (multitask learning).
+
+### Model Types
+- **BERT/DeBERTa-based**: For ATE, ASC, and end-to-end multitask.
+- **LoRA**: Parameter-efficient fine-tuning (optional).
+- **Traditional**: BiLSTM-CRF, CRF (for comparison).
+
+### Data Handling
+- **Per-domain splits**: Data in `data/splits/{domain}/[ate|asc|end2end]/`.
+- **Preprocessing**: Modular, robust, and extensible (see `src/preprocessing.py`).
+- **Collate Functions**: Custom batching for multitask and pipeline models.
+
+### Training & Evaluation
+- **Config-driven**: All scripts accept a `--config` argument (YAML).
+- **Logging**: Logs saved in `logs/{ate,asc,end2end}/`.
+- **Checkpoints**: Saved in `models/{ate,asc,end2end}/`.
+- **Evaluation**: Reports and plots in `reports/evaluation/`.
+
+### Prediction
+- **Script**: `scripts/predict.py` for all model types.
+- **Post-processing**: Robust mapping from model outputs to aspect/sentiment labels.
+
+---
 
 ## Setup
 
-### Automated Setup (Recommended)
+### Automated Setup
 
-Use the provided setup scripts to create a virtual environment and install all dependencies:
-
-**Windows:**
-```bash
-# Run the setup script
-.\setup.bat
-
-# Activate the environment
-.\activate.bat
-```
-
-**PowerShell:**
+**Windows (PowerShell):**
 ```powershell
-# Run the setup script
-.\setup.ps1
-
-# Activate the environment
-.\activate.bat
+./setup.ps1
+./activate.bat
 ```
-
+**Windows (CMD):**
+```bat
+setup.bat
+activate.bat
+```
 **Unix/Linux/macOS:**
 ```bash
-# Make script executable and run
 chmod +x setup.sh
 ./setup.sh
-
-# Activate the environment
 source venv/bin/activate
 ```
 
 ### Manual Setup
+1. Create venv: `python -m venv venv`
+2. Activate: `venv\Scripts\activate` (Windows) or `source venv/bin/activate` (Unix/Linux)
+3. Install: `pip install -r requirements.txt`
 
-If you prefer manual setup:
-1. Create virtual environment: `python -m venv venv`
-2. Activate environment: `venv\Scripts\activate` (Windows) or `source venv/bin/activate` (Unix/Linux)
-3. Install dependencies: `pip install -r requirements.txt`
+---
 
 ## Quick Start
 
-1. **Setup environment**: Use `setup.bat` (Windows) or `setup.sh` (Unix/Linux)
-2. **Activate environment**: Run `activate.bat` or `source venv/bin/activate`
-3. **Prepare data**: `python scripts/prepare_absa_data.py`
-4. **Train ATE model**: `python scripts/train_ate.py --config configs/deberta_ate.yaml`
-5. **Train ASC model**: `python scripts/train_asc.py --config configs/deberta_asc.yaml`
-6. **Evaluate pipeline**: `python scripts/evaluate_absa.py --ate-model ./models/ate_best.pt --asc-model ./models/asc_best.pt`
+### Data Preparation
+- Place raw data in `data/raw/` or use provided scripts/notebooks for cleaning.
+- Preprocess and split: `python scripts/prepare_absa_data.py`
 
-## Datasets
+### Training
+- **ATE**: `python scripts/train.py --config configs/deberta_ate.yaml`
+- **ASC**: `python scripts/train.py --config configs/deberta_asc.yaml`
+- **End-to-End**: `python scripts/train.py --config configs/bert_end_to_end.yaml`
 
-- SemEval 2014 Task 4 (Laptops, Restaurants)
-- SemEval 2015 Task 12 (Hotels, Restaurants)
-- SemEval 2016 Task 5 (Laptops, Restaurants)
-- Custom domain-specific ABSA datasets
+### Evaluation
+- `python scripts/evaluate.py --config configs/bert_end_to_end.yaml`
 
-## Models
+### Prediction
+- `python scripts/predict.py --config configs/bert_end_to_end.yaml --input <input_file> --output <output_file>`
 
-- **DeBERTa with LoRA**: Parameter-efficient fine-tuning
-- **BERT Pipeline**: Separate models for ATE and ASC
-- **End-to-End Models**: Joint aspect-sentiment prediction
-- **Traditional Models**: CRF, BiLSTM-CRF for comparison
+---
 
-## Evaluation Metrics
-
-- **ATE**: Precision, Recall, F1 for aspect extraction
-- **ASC**: Accuracy, F1 for sentiment classification
+## Evaluation & Reporting
+- **ATE**: Precision, Recall, F1 (aspect extraction)
+- **ASC**: Accuracy, F1 (sentiment classification)
 - **End-to-End**: Exact match, aspect-sentiment F1
+- **Reports**: See `reports/evaluation/` for classification reports, confusion matrices, and prediction distributions.
+
+---
+
+## Extensibility & Advanced Features
+- **Add new models**: Implement in `src/models.py` and update config.
+- **Custom data**: Add to `data/raw/` and update splits.
+- **Advanced evaluation**: Extend `src/evaluation.py` or add new scripts.
+- **Visualization**: Use `visualizations/` for custom plots.
+
+---
+
+## References & Credits
+- SemEval ABSA datasets (2014-2016)
+- BERT, DeBERTa, LoRA papers
+- See `references/` for notebooks and key papers
+
+---
+
+## Contact
+For questions, issues, or contributions, please open an issue or contact the maintainer.
