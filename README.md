@@ -1,11 +1,30 @@
 # Aspect-Based Sentiment Analysis (ABSA) for Comments
 
-A modular, robust, and extensible pipeline for Aspect-Based Sentiment Analysis (ABSA) on comment data, supporting Aspect Term Extraction (ATE), Aspect Sentiment Classification (ASC), and joint end-to-end (multitask) models. Built for research and practical deployment, with strong configuration, error handling, and reporting.
+A modular, robust, and extensible pipeline for Aspect-Based Sentiment Analysis (ABSA) on comment data. Supports Aspect Term Extraction (ATE), Aspect Sentiment Classification (ASC), and joint end-to-end (multitask) models. Built for research and practical deployment, with strong configuration, error handling, and reporting.
+
+---
+
+## Table of Contents
+- [Features](#features)
+- [Project Structure](#project-structure)
+- [Supported Tasks & Model Types](#supported-tasks--model-types)
+- [Data Handling & Preprocessing](#data-handling--preprocessing)
+- [Setup](#setup)
+- [Workflow](#workflow)
+  - [Data Preparation](#data-preparation)
+  - [Training](#training)
+  - [Evaluation](#evaluation)
+  - [Prediction](#prediction)
+    - [End-to-End Model](#end-to-end-model)
+    - [Pipeline (ATE+ASC)](#pipeline-ateasc)
+- [Evaluation & Reporting](#evaluation--reporting)
+- [Extensibility & Advanced Features](#extensibility--advanced-features)
+- [References & Credits](#references--credits)
+- [Contact](#contact)
 
 ---
 
 ## Features
-
 - **End-to-End ABSA**: Joint aspect extraction and sentiment classification in a single model, or as a pipeline.
 - **Modular Architecture**: Swap models, datasets, and configs easily. Supports BERT, DeBERTa, LoRA, and more.
 - **Config-Driven Workflow**: All training, evaluation, and prediction are controlled by YAML config files.
@@ -16,49 +35,15 @@ A modular, robust, and extensible pipeline for Aspect-Based Sentiment Analysis (
 ---
 
 ## Project Structure
-
 ```
 Comment-ABSA/
-├── activate.bat
-├── README.md
-├── requirements.txt
-├── setup.bat / setup.ps1 / setup.py
 ├── configs/           # YAML config files for all model types and domains
-│   ├── bert_end_to_end.yaml
-│   ├── deberta_asc.yaml
-│   ├── deberta_ate.yaml
-│   └── ...
 ├── data/              # Raw, preprocessed, and split datasets (per domain)
-│   ├── raw/
-│   ├── preprocessed/
-│   ├── processed/
-│   ├── splits/
-│   └── ...
 ├── src/               # Source code (models, training, utils, preprocessing)
-│   ├── absa_trainer.py
-│   ├── data_utils.py
-│   ├── evaluation.py
-│   ├── models.py
-│   ├── preprocessing.py
-│   ├── training.py
-│   └── ...
 ├── scripts/           # Entry-point scripts for training, evaluation, prediction
-│   ├── train.py
-│   ├── evaluate.py
-│   └── predict.py
 ├── models/            # Saved checkpoints and best models (per run/domain)
-│   ├── asc_tweets_*/
-│   ├── ate_tweets_*/
-│   ├── end2end_restaurants_*/
-│   ├── checkpoints/
-│   └── final/
 ├── logs/              # Training logs (per model type and run)
-│   ├── asc/
-│   ├── ate/
-│   ├── end2end/
-│   └── ...
 ├── reports/           # Evaluation reports and plots
-│   └── evaluation/
 ├── outputs/           # Output configs and training histories
 ├── notebooks/         # Data cleaning, exploration, and reference notebooks
 ├── tests/             # Unit tests
@@ -67,9 +52,9 @@ Comment-ABSA/
 
 ---
 
-## Architecture & Workflow
+## Supported Tasks & Model Types
 
-### Supported Tasks
+### Tasks
 - **Aspect Term Extraction (ATE)**: Sequence labeling to extract aspect terms.
 - **Aspect Sentiment Classification (ASC)**: Classify sentiment for each aspect.
 - **End-to-End ABSA**: Jointly extract aspects and classify their sentiment (multitask learning).
@@ -79,45 +64,35 @@ Comment-ABSA/
 - **LoRA**: Parameter-efficient fine-tuning (optional).
 - **Traditional**: BiLSTM-CRF, CRF (for comparison).
 
-### Data Handling
+---
+
+## Data Handling & Preprocessing
 - **Per-domain splits**: Data in `data/splits/{domain}/[ate|asc|end2end]/`.
 - **Preprocessing**: Modular, robust, and extensible (see `src/preprocessing.py`).
 - **Collate Functions**: Custom batching for multitask and pipeline models.
-
-### Training & Evaluation
-- **Config-driven**: All scripts accept a `--config` argument (YAML).
-- **Domain-specific**: Use `--domain` to specify the dataset domain (e.g., `laptops`, `restaurants`, `tweets`).
-- **Output directory**: Use `--output_dir` to specify where to save model checkpoints.
-- **Logging**: Logs saved in `logs/{ate,asc,end2end}/`.
-- **Checkpoints**: Saved in `models/{ate,asc,end2end}/`.
-- **Evaluation**: Reports and plots in `reports/evaluation/`.
-
-### Prediction
-- **Script**: `scripts/predict.py` for all model types.
-- **Post-processing**: Robust mapping from model outputs to aspect/sentiment labels.
+- **Data cleaning and splitting**: Use provided notebooks/scripts for preparing and splitting data.
 
 ---
 
 ## Setup
 
 ### Automated Setup
-
-**Windows (PowerShell):**
-```powershell
-./setup.ps1
-./activate.bat
-```
-**Windows (CMD):**
-```bat
-setup.bat
-activate.bat
-```
-**Unix/Linux/macOS:**
-```bash
-chmod +x setup.sh
-./setup.sh
-source venv/bin/activate
-```
+- **Windows (PowerShell):**
+  ```powershell
+  ./setup.ps1
+  ./activate.bat
+  ```
+- **Windows (CMD):**
+  ```bat
+  setup.bat
+  activate.bat
+  ```
+- **Unix/Linux/macOS:**
+  ```bash
+  chmod +x setup.sh
+  ./setup.sh
+  source venv/bin/activate
+  ```
 
 ### Manual Setup
 1. Create venv: `python -m venv venv`
@@ -126,7 +101,7 @@ source venv/bin/activate
 
 ---
 
-## Quick Start
+## Workflow
 
 ### Data Preparation
 - Place raw data in `data/raw/` or use provided scripts/notebooks for cleaning.
@@ -139,7 +114,7 @@ source venv/bin/activate
   ```
 - **ASC**:
   ```powershell
-  python scripts/train.py --config configs/deberta_asc.yaml --domain tweets 
+  python scripts/train.py --config configs/deberta_asc.yaml --domain tweets
   ```
 - **End-to-End**:
   ```powershell
@@ -149,13 +124,28 @@ source venv/bin/activate
 ### Evaluation
 - Evaluate a trained model:
   ```powershell
-  python scripts/evaluate.py --config configs/bert_end_to_end.yaml --domain restaurants --model_dir models/end2end_restaurants_YYYYMMDD_HHMMSS
+  python scripts/evaluate.py --config configs/bert_end_to_end.yaml --domain restaurants --model_path models/end2end_restaurants_YYYYMMDD_HHMMSS/best_model.pt
   ```
 
 ### Prediction
-- Predict on new data:
+#### End-to-End Model
+- Use a single multitask model to extract aspects and classify their sentiment in one step.
   ```powershell
-  python scripts/predict.py --config configs/bert_end_to_end.yaml --domain restaurants --model_dir models/end2end_restaurants_YYYYMMDD_HHMMSS --input <input_file> --output <output_file>
+  python scripts/predict.py --config configs/bert_end_to_end.yaml --model_path models/end2end_restaurants_YYYYMMDD_HHMMSS/best_model.pt --text "The food was great but the service was slow."
+  ```
+- For batch prediction:
+  ```powershell
+  python scripts/predict.py --config configs/bert_end_to_end.yaml --model_path models/end2end_restaurants_YYYYMMDD_HHMMSS/best_model.pt --input_file data/some_texts.csv --output_file outputs/predictions.json
+  ```
+
+#### Pipeline (ATE+ASC)
+- Use two models: first an ATE model to extract aspect terms, then an ASC model to classify sentiment for each aspect.
+  ```powershell
+  python scripts/predict.py --model_path models/asc_tweets_YYYYMMDD_HHMMSS/best_model.pt --config configs/deberta_asc.yaml --ate_model_path models/ate_tweets_YYYYMMDD_HHMMSS/best_model.pt --ate_config configs/deberta_ate.yaml --text "why the hell do i follow donald trump on twitter?"
+  ```
+- For batch prediction:
+  ```powershell
+  python scripts/predict.py --model_path models/asc_tweets_YYYYMMDD_HHMMSS/best_model.pt --config configs/deberta_asc.yaml --ate_model_path models/ate_tweets_YYYYMMDD_HHMMSS/best_model.pt --ate_config configs/deberta_ate.yaml --input_file data/some_texts.csv --output_file outputs/predictions.json
   ```
 
 ---
