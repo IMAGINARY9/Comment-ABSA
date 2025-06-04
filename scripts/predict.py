@@ -73,7 +73,6 @@ def preprocess_text(text, config):
 def predict_single_text(model, tokenizer, text, config, ate_model=None, ate_tokenizer=None, ate_config=None):
     """Predict aspects and sentiments for a single text."""
     task = config['model'].get('task', 'token_classification')
-    # Use the same preprocessing as in training for ATE
     from src.preprocessing import ABSAPreprocessor
     preproc = ABSAPreprocessor(tokenizer_name=config['model']['name'])
     cleaned_text = preproc.clean_text(text)
@@ -82,30 +81,51 @@ def predict_single_text(model, tokenizer, text, config, ate_model=None, ate_toke
         if task == 'token_classification' and ate_model is None:
             # ATE: Token classification (BIO tagging)
             max_length = config['model'].get('max_length', 128)
-            # Use the same tokenization as in training
+            # Tokenize as in training (split into words, then encode)
+            tokens = nltk.word_tokenize(cleaned_text)
             encoding = tokenizer(
-                cleaned_text,
+                tokens,
+                is_split_into_words=True,
                 truncation=True,
                 padding='max_length',
                 max_length=max_length,
-                return_tensors='pt',
-                is_split_into_words=False  # match training unless you used split words
+                return_tensors='pt'
             )
             if 'token_type_ids' in encoding:
                 encoding.pop('token_type_ids')
             encoding = {k: v.to(device) for k, v in encoding.items()}
-            # Use model's extract_aspects for robust subword handling
-            aspects = model.extract_aspects(encoding['input_ids'], encoding['attention_mask'], tokenizer)[0]
-            print(f"\nExtracted aspects: {aspects}")
-            # Filter out spurious/fragmented aspects
-            filtered_aspects = []
-            for a in aspects:
-                a_clean = a.replace('▁', '').replace('##', '').strip()
-                if not a_clean or len(a_clean) < 2:
-                    continue
-                if len(a_clean) == 1 or all(c in ',.!?;:-' for c in a_clean):
-                    continue
-                filtered_aspects.append((a_clean, None))
+            outputs = model(**encoding)
+            # Get predicted label ids
+            pred_ids = outputs['logits'].argmax(-1).squeeze(0).tolist()
+            word_ids = encoding['input_ids'].shape[1]
+            # Map predictions back to tokens
+            word_tokens = tokens
+            bio_tags = []
+            for i, token in enumerate(word_tokens):
+                if i < len(pred_ids):
+                    tag_id = pred_ids[i]
+                    tag = {0: 'B-ASP', 1: 'I-ASP', 2: 'B-OP', 3: 'I-OP', 4: 'O'}.get(tag_id, 'O')
+                    bio_tags.append(tag)
+                else:
+                    bio_tags.append('O')
+            # Extract aspect terms from BIO tags
+            aspects = []
+            current = []
+            for token, tag in zip(word_tokens, bio_tags):
+                if tag == 'B-ASP':
+                    if current:
+                        aspects.append(' '.join(current))
+                        current = []
+                    current = [token]
+                elif tag == 'I-ASP' and current:
+                    current.append(token)
+                else:
+                    if current:
+                        aspects.append(' '.join(current))
+                        current = []
+            if current:
+                aspects.append(' '.join(current))
+            filtered_aspects = [(a, None) for a in aspects if a and len(a.strip()) > 1]
             result = {
                 'text': text,
                 'processed_text': cleaned_text,

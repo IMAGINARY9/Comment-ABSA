@@ -8,21 +8,20 @@ This module provides preprocessing utilities for Aspect-Based Sentiment Analysis
 - Dataset preparation and augmentation
 """
 
+import os
 import re
+import logging
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Union
 import torch
+import nltk
+from typing import Dict, List, Tuple, Optional, Union
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
-import json
 from pathlib import Path
-import logging
 from collections import Counter
-import nltk
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
-import spacy
 
 # Download NLTK data if not present
 try:
@@ -58,9 +57,10 @@ class ABSAPreprocessor:
         
         # Load spaCy model for advanced processing
         try:
+            import spacy
             self.nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            self.logger.warning("spaCy model not found. Some features may be limited.")
+        except Exception as e:
+            self.logger.warning(f"spaCy model not loaded: {e}")
             self.nlp = None
         
         # Stop words
@@ -90,28 +90,14 @@ class ABSAPreprocessor:
         Returns:
             Cleaned text
         """
-        if not text or pd.isna(text):
+        if not text or (hasattr(pd, 'isna') and pd.isna(text)):
             return ""
-        
         text = str(text)
-        
-        # Remove HTML tags
         text = re.sub(r'<[^>]+>', '', text)
-        
-        # Remove URLs
-        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', 
-                     '[URL]', text)
-        
-        # Handle special characters and punctuation
+        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '[URL]', text)
         text = re.sub(r'[^\w\s\.\!\?\,\;\:\-\(\)\[\]\'\"]+', ' ', text)
-        
-        # Normalize whitespace
         text = re.sub(r'\s+', ' ', text)
-        
-        # Remove extra punctuation
         text = re.sub(r'([.!?]){2,}', r'\1', text)
-        
-        # Handle contractions
         contractions = {
             "won't": "will not",
             "can't": "cannot",
@@ -122,10 +108,8 @@ class ABSAPreprocessor:
             "'d": " would",
             "'m": " am"
         }
-        
         for contraction, expansion in contractions.items():
-            text = text.replace(contraction, expansion)
-        
+            text = re.sub(contraction, expansion, text)
         return text.strip()
     
     def extract_aspects_from_text(self, text: str, domain: str = None) -> List[str]:
@@ -148,33 +132,14 @@ class ABSAPreprocessor:
         # Rule-based aspect extraction patterns
         for token in doc:
             # Nouns that are not stop words
-            if (token.pos_ in ['NOUN', 'PROPN'] and 
-                token.text.lower() not in self.stop_words and
-                len(token.text) > 2):
-                aspects.append(token.text.lower())
-            
-            # Compound nouns
-            if token.dep_ == 'compound':
-                head = token.head
-                if head.pos_ == 'NOUN':
-                    compound = f"{token.text} {head.text}".lower()
-                    aspects.append(compound)
+            if token.pos_ in ["NOUN", "PROPN"] and not token.is_stop:
+                aspects.append(token.text)
         
         # Domain-specific filtering
         if domain and domain in self.aspect_domains:
-            domain_aspects = []
-            for aspect in aspects:
-                for domain_term in self.aspect_domains[domain]:
-                    if domain_term in aspect or aspect in domain_term:
-                        domain_aspects.append(aspect)
-                        break
-                else:
-                    # Keep if it's a common aspect pattern
-                    if any(pattern in aspect for pattern in ['quality', 'size', 'color', 'taste']):
-                        domain_aspects.append(aspect)
-            aspects = domain_aspects
+            aspects = [a for a in aspects if a.lower() in self.aspect_domains[domain]]
         
-        return list(set(aspects))  # Remove duplicates
+        return list(set(aspects))
     
     def create_bio_tags(self, text: str, aspects: List[str]) -> List[str]:
         """
@@ -199,14 +164,12 @@ class ABSAPreprocessor:
                     # Mark B-ASP for first token, I-ASP for rest
                     tags[i] = 'B-ASP'
                     for j in range(1, len(aspect_tokens)):
-                        if i + j < len(tags):
-                            tags[i + j] = 'I-ASP'
+                        tags[i+j] = 'I-ASP'
                     break
         
         return tags
     
-    def prepare_ate_data(self, texts: List[str], aspects_list: List[List[str]], 
-                        max_length: int = 128) -> Dict:
+    def prepare_ate_data(self, texts: List[str], aspects_list: List[List[str]], max_length: int = 128) -> Dict:
         """
         Prepare data for Aspect Term Extraction (token classification).
         
@@ -218,60 +181,37 @@ class ABSAPreprocessor:
         Returns:
             Dictionary with tokenized inputs and labels
         """
+        import torch
         tokenized_inputs = []
         labels = []
         
         for text, aspects in zip(texts, aspects_list):
-            # Clean text
-            cleaned_text = self.clean_text(text)
-            
-            # Create BIO tags
-            tokens = word_tokenize(cleaned_text.lower())
-            bio_tags = self.create_bio_tags(cleaned_text, aspects)
-            
-            # Tokenize with transformer tokenizer
-            encoding = self.tokenizer(
-                cleaned_text,
-                truncation=True,
-                padding='max_length',
-                max_length=max_length,
-                return_tensors='pt'
-            )
-            
-            # Align labels with subword tokens
-            word_ids = encoding.word_ids()
-            aligned_labels = []
-            previous_word_idx = None
-            
+            cleaned = self.clean_text(text)
+            bio_tags = self.create_bio_tags(cleaned, aspects)
+            tokens = word_tokenize(cleaned.lower())
+            encoding = self.tokenizer(tokens, is_split_into_words=True, truncation=True, padding='max_length', max_length=max_length, return_tensors='pt')
+            label_ids = []
+            word_ids = encoding.word_ids(batch_index=0)
             for word_idx in word_ids:
-                if word_idx is None:  # Special tokens
-                    aligned_labels.append(-100)  # Ignore in loss
-                elif word_idx != previous_word_idx:  # First subword of a word
-                    if word_idx < len(bio_tags):
-                        label = bio_tags[word_idx]
-                        if label == 'B-ASP':
-                            aligned_labels.append(0)
-                        elif label == 'I-ASP':
-                            aligned_labels.append(1)
-                        else:  # 'O'
-                            aligned_labels.append(4)
-                    else:
-                        aligned_labels.append(4)  # 'O'
-                else:  # Subsequent subwords
-                    aligned_labels.append(-100)  # Ignore in loss
-                
-                previous_word_idx = word_idx
-            
-            tokenized_inputs.append({
-                'input_ids': encoding['input_ids'].squeeze(),
-                'attention_mask': encoding['attention_mask'].squeeze(),
-                'labels': torch.tensor(aligned_labels, dtype=torch.long)
-            })
+                if word_idx is None:
+                    label_ids.append(-100)
+                elif word_idx < len(bio_tags):
+                    tag = bio_tags[word_idx]
+                    label_ids.append({'B-ASP': 0, 'I-ASP': 1, 'O': 4}.get(tag, 4))
+                else:
+                    label_ids.append(-100)
+            encoding['labels'] = torch.tensor(label_ids)
+            tokenized_inputs.append(encoding)
+            labels.append(label_ids)
+        
+        input_ids = torch.cat([x['input_ids'] for x in tokenized_inputs], dim=0)
+        attention_mask = torch.cat([x['attention_mask'] for x in tokenized_inputs], dim=0)
+        labels_tensor = torch.stack([x['labels'] for x in tokenized_inputs])
         
         return {
-            'input_ids': torch.stack([x['input_ids'] for x in tokenized_inputs]),
-            'attention_mask': torch.stack([x['attention_mask'] for x in tokenized_inputs]),
-            'labels': torch.stack([x['labels'] for x in tokenized_inputs])
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'labels': labels_tensor
         }
     
     def prepare_asc_data(self, texts: List[str], aspects: List[str], 
@@ -500,44 +440,63 @@ class ABSAPreprocessor:
         Load BIO-tagged data for ATE from splits.
         Returns: train_data, val_data, test_data (as torch Dataset)
         """
-        import pandas as pd
-        from torch.utils.data import Dataset
         class SimpleATEDataset(Dataset):
-            def __init__(self, df):
-                self.tokens = df['tokens'].tolist()
-                self.bio_tags = df['bio_tags'].tolist()
-                self.texts = df['clean_text'].tolist()
+            def __init__(self, df, preprocessor, max_length=128):
+                # Use 'clean_text' if present, else fallback to 'text'
+                if 'clean_text' in df.columns:
+                    self.texts = df['clean_text'].tolist()
+                elif 'text' in df.columns:
+                    self.texts = df['text'].tolist()
+                else:
+                    raise ValueError("No 'clean_text' or 'text' column found in ATE split CSV.")
+                # Use bio_tags if present, else try to generate from aspects
+                if 'bio_tags' in df.columns:
+                    # bio_tags may be stored as a string representation of a list
+                    def parse_tags(x):
+                        if isinstance(x, str):
+                            try:
+                                tags = eval(x)
+                                if isinstance(tags, list):
+                                    return tags
+                            except:
+                                pass
+                        return []
+                    self.bio_tags = df['bio_tags'].apply(parse_tags).tolist()
+                else:
+                    # Fallback: try to generate from aspects
+                    if 'aspects' in df.columns:
+                        self.bio_tags = [preprocessor.create_bio_tags(t, eval(a) if isinstance(a, str) else []) for t, a in zip(self.texts, df['aspects'])]
+                    else:
+                        self.bio_tags = [['O'] * len(t.split()) for t in self.texts]
+                self.preprocessor = preprocessor
+                self.max_length = max_length
+                # Convert bio_tags to label ids
+                tag2id = {'B-ASP': 0, 'I-ASP': 1, 'B-OP': 2, 'I-OP': 3, 'O': 4}
+                self.labels = [[tag2id.get(tag, 4) for tag in tags] for tags in self.bio_tags]
+                # Prepare data
+                self.data = self.preprocessor.prepare_ate_data(self.texts, [[] for _ in self.texts], max_length=self.max_length)
+                # Overwrite labels with correct ones
+                self.data['labels'] = torch.tensor([self._pad_labels(l, self.max_length) for l in self.labels], dtype=torch.long)
+            def _pad_labels(self, label_ids, max_length):
+                # Pad or truncate label_ids to max_length, using -100 for ignored positions
+                if len(label_ids) >= max_length:
+                    return label_ids[:max_length]
+                return label_ids + [-100] * (max_length - len(label_ids))
             def __len__(self):
-                return len(self.tokens)
+                return len(self.texts)
             def __getitem__(self, idx):
-                # Convert string representation of lists to actual lists
-                import ast
-                tokens = ast.literal_eval(self.tokens[idx]) if isinstance(self.tokens[idx], str) else self.tokens[idx]
-                bio_tags = ast.literal_eval(self.bio_tags[idx]) if isinstance(self.bio_tags[idx], str) else self.bio_tags[idx]
-                # Tokenize and align for model input
-                encoding = self_outer.tokenizer(
-                    tokens,
-                    is_split_into_words=True,
-                    truncation=True,
-                    max_length=128,
-                    padding='max_length',
-                    return_tensors='pt'
-                )
-                # Map BIO tags to label ids
-                label_map = {'B-ASP': 0, 'I-ASP': 1, 'B-OP': 2, 'I-OP': 3, 'O': 4}
-                labels = [label_map.get(tag, 4) for tag in bio_tags]
-                labels = labels[:128] + [-100] * (128 - len(labels)) if len(labels) < 128 else labels[:128]
                 return {
-                    'input_ids': encoding['input_ids'].squeeze(0),
-                    'attention_mask': encoding['attention_mask'].squeeze(0),
-                    'labels': torch.tensor(labels)
+                    'input_ids': self.data['input_ids'][idx],
+                    'attention_mask': self.data['attention_mask'][idx],
+                    'labels': self.data['labels'][idx]
                 }
-        # Patch to access tokenizer from outer class
-        self_outer = self
         train_df = pd.read_csv(f"{data_dir}/train.csv")
         val_df = pd.read_csv(f"{data_dir}/val.csv")
         test_df = pd.read_csv(f"{data_dir}/test.csv")
-        return SimpleATEDataset(train_df), SimpleATEDataset(val_df), SimpleATEDataset(test_df)
+        train_data = SimpleATEDataset(train_df, self, max_length=128)
+        val_data = SimpleATEDataset(val_df, self, max_length=128)
+        test_data = SimpleATEDataset(test_df, self, max_length=128)
+        return train_data, val_data, test_data
 
     def load_asc_data(self, data_dir, train_size=None, val_size=None, test_size=None, max_length=None):
         """

@@ -26,6 +26,7 @@ from models import DeBERTaATE, DeBERTaASC, BERTForABSA, EndToEndABSA
 from preprocessing import ABSAPreprocessor, collate_end2end_absa_batch
 from torch.utils.data import DataLoader
 from sklearn.metrics import precision_recall_fscore_support
+import os
 
 warnings.filterwarnings('ignore')
 
@@ -177,15 +178,15 @@ def generate_evaluation_report(metrics, output_path, plot_paths=None, error_anal
 
 | Metric | Value |
 |--------|-------|
-| ATE Precision | {fmt(metrics.get('ate_precision', 'N/A'))} |
-| ATE Recall | {fmt(metrics.get('ate_recall', 'N/A'))} |
-| ATE F1-Score | {fmt(metrics.get('ate_f1', 'N/A'))} |
-| ASC Accuracy | {fmt(metrics.get('asc_accuracy', 'N/A'))} |
-| ASC F1-Macro | {fmt(metrics.get('asc_f1_macro', 'N/A'))} |
-| ASC F1-Weighted | {fmt(metrics.get('asc_f1_weighted', 'N/A'))} |
-| E2E Exact Match | {fmt(metrics.get('e2e_exact_match', 'N/A'))} |
-| E2E Aspect F1 | {fmt(metrics.get('e2e_aspect_f1', 'N/A'))} |
-| E2E Sentiment F1 | {fmt(metrics.get('e2e_sentiment_f1', 'N/A'))} |
+| ATE Precision | {fmt(metrics.get('precision', 'N/A'))} |
+| ATE Recall | {fmt(metrics.get('recall', 'N/A'))} |
+| ATE F1-Score | {fmt(metrics.get('f1_score', 'N/A'))} |
+| ASC Accuracy | {fmt(metrics.get('accuracy', 'N/A'))} |
+| ASC F1-Macro | {fmt(metrics.get('f1_macro', 'N/A'))} |
+| ASC F1-Weighted | {fmt(metrics.get('f1_weighted', 'N/A'))} |
+| E2E Exact Match | {fmt(metrics.get('exact_match', 'N/A'))} |
+| E2E Aspect F1 | {fmt(metrics.get('aspect_f1', 'N/A'))} |
+| E2E Sentiment F1 | {fmt(metrics.get('sentiment_f1', 'N/A'))} |
 
 ## Model Configuration
 - Model Type: {metrics.get('model_type', 'N/A')}
@@ -202,7 +203,7 @@ def generate_evaluation_report(metrics, output_path, plot_paths=None, error_anal
             report += f"\n### Prediction/Label Distribution\n![]({plot_paths['distribution'].as_posix()})\n"
     if error_analysis:
         report += "\n## Error Analysis\n" + error_analysis + "\n"
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         f.write(report)
 
 def load_model(model_path, config, device):
@@ -233,7 +234,8 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate ABSA model')
     parser.add_argument('--model_path', type=str, required=True, help='Path to trained model')
     parser.add_argument('--config', type=str, required=True, help='Path to config file')
-    parser.add_argument('--data_dir', type=str, help='Path to data directory')
+    parser.add_argument('--data_dir', type=str, help='Path to data directory (overrides domain)')
+    parser.add_argument('--domain', type=str, help='Dataset domain (e.g., laptops, restaurants, tweets)')
     parser.add_argument('--output_dir', type=str, default='reports/evaluation', help='Output directory for reports')
     parser.add_argument('--plots_dir', type=str, default='reports/figures', help='Directory to save plots')
     args = parser.parse_args()
@@ -257,6 +259,20 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, tokenizer = load_model(args.model_path, config, device)
 
+    # Determine data_dir from domain or argument (like train.py)
+    data_dir = args.data_dir
+    if not data_dir:
+        domain = args.domain or config.get('data', {}).get('dataset')
+        if not domain:
+            raise ValueError("You must specify --data_dir or --domain (or set data.dataset in config)")
+        if model_type == 'end_to_end':
+            data_dir = os.path.join('data', 'splits', domain, 'end2end')
+        else:
+            data_dir = os.path.join('data', 'splits', domain)
+        print(f"Auto-selected data_dir: {data_dir}")
+    else:
+        print(f"Using provided data_dir: {data_dir}")
+
     # Prepare data
     preprocessor = ABSAPreprocessor(
         task=model_type,
@@ -265,7 +281,7 @@ def main():
     if model_type == 'ate':
         print("Evaluating Aspect Term Extraction model...")
         test_data = preprocessor.load_ate_data(
-            data_dir=args.data_dir,
+            data_dir=data_dir,
             train_size=config['data']['train_size'],
             val_size=config['data']['val_size'],
             test_size=config['data']['test_size']
@@ -275,7 +291,7 @@ def main():
     elif model_type == 'asc':
         print("Evaluating Aspect Sentiment Classification model...")
         test_data = preprocessor.load_asc_data(
-            data_dir=args.data_dir,
+            data_dir=data_dir,
             train_size=config['data']['train_size'],
             val_size=config['data']['val_size'],
             test_size=config['data']['test_size']
@@ -285,7 +301,7 @@ def main():
     else:
         print("Evaluating End-to-End ABSA model...")
         test_data = preprocessor.load_end_to_end_data(
-            data_dir=args.data_dir,
+            data_dir=data_dir,
             train_size=config['data']['train_size'],
             val_size=config['data']['val_size'],
             test_size=config['data']['test_size']
@@ -323,12 +339,12 @@ def main():
     report_path = output_dir / 'evaluation_report.md'
     generate_evaluation_report(metrics, report_path, plot_paths, error_analysis)
     
-    print(f"\\n✅ Evaluation completed!")
-    print(f"📊 Results saved to: {output_dir}")
-    print(f"📋 Report: {report_path}")
+    print(f"\\nEvaluation completed!")
+    print(f"Results saved to: {output_dir}")
+    print(f"Report: {report_path}")
     
     # Print summary metrics
-    print(f"\\n📈 Performance Summary:")
+    print(f"\\nPerformance Summary:")
     for key, value in metrics.items():
         if isinstance(value, (int, float)) and key not in ['evaluation_date']:
             print(f"   {key}: {value:.4f}")

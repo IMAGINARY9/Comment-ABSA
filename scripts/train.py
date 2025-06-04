@@ -306,7 +306,8 @@ def main():
     """Main training function."""
     parser = argparse.ArgumentParser(description="Train ABSA models")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to data directory")
+    parser.add_argument("--data_dir", type=str, help="Path to data directory (overrides domain)")
+    parser.add_argument("--domain", type=str, help="Dataset domain (e.g., laptops, restaurants, tweets)")
     parser.add_argument("--output_dir", type=str, default="./outputs", help="Output directory")
     parser.add_argument("--wandb_project", type=str, default="absa-training", help="Wandb project name")
     parser.add_argument("--wandb_run_name", type=str, help="Wandb run name")
@@ -314,43 +315,50 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--log_level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    
     args = parser.parse_args()
-    
+
     # Setup
     setup_logging(args.log_level)
     set_seed(args.seed)
-    
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.info("Debug mode enabled")
-    
+
+    # Load configuration
+    config = load_config(args.config)
+    logging.info(f"Loaded config from {args.config}")
+
+    # Determine data_dir from domain or argument
+    data_dir = args.data_dir
+    if not data_dir:
+        # Use --domain if provided, else try config['data']['dataset']
+        domain = args.domain or config.get('data', {}).get('dataset')
+        if not domain:
+            raise ValueError("You must specify --data_dir or --domain (or set data.dataset in config)")
+        # For ATE and ASC, expect splits in data/splits/{domain}/
+        task = config['model'].get('task', 'token_classification')
+        if task == 'absa_end_to_end':
+            data_dir = os.path.join('data', 'splits', domain, 'end2end')
+        else:
+            data_dir = os.path.join('data', 'splits', domain)
+        logging.info(f"Auto-selected data_dir: {data_dir}")
+    else:
+        logging.info(f"Using provided data_dir: {data_dir}")
+
     # Add timestamp to output_dir if not already present
     timestamp = get_timestamp()
-    # Compose a descriptive model_dir name: task_dataset_timestamp
-    task = None
-    dataset = None
-    if '--config' in sys.argv:
-        # Try to extract dataset/task from config if possible
-        # (config is loaded below, so we will update model_dir after loading config)
-        pass
     if not args.output_dir.endswith(timestamp):
         output_dir = os.path.join(args.output_dir, f"run_{timestamp}")
     else:
         output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load configuration
-    config = load_config(args.config)
-    logging.info(f"Loaded config from {args.config}")
-
     # Setup device
     device = setup_device()
 
     # Compose model_dir with task, dataset, and timestamp
     task = config['model'].get('task', 'absa')
-    dataset = config.get('data', {}).get('dataset', os.path.basename(os.path.normpath(args.data_dir)))
-    # Shorten task for folder name
+    dataset = config.get('data', {}).get('dataset', os.path.basename(os.path.normpath(data_dir)))
     task_short = {'token_classification': 'ate', 'sequence_classification': 'asc', 'absa_end_to_end': 'end2end'}.get(task, task)
     model_dir_name = f"{task_short}_{dataset}_{timestamp}"
     model_dir = os.path.join('models', model_dir_name)
@@ -365,7 +373,7 @@ def main():
     config_save_path = os.path.join(output_dir, "config.yaml")
     with open(config_save_path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
-    
+
     # Initialize wandb
     use_wandb = args.wandb
     if use_wandb:
@@ -380,10 +388,10 @@ def main():
         except Exception as e:
             logging.warning(f"Failed to initialize wandb: {e}")
             use_wandb = False
-    
+
     try:
         # Prepare data
-        train_loader, val_loader, test_loader = prepare_data(config, args.data_dir)
+        train_loader, val_loader, test_loader = prepare_data(config, data_dir)
         
         # Create model
         model = create_model(config, device)

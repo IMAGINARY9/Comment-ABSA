@@ -135,15 +135,15 @@ source venv/bin/activate
 ### Training
 - **ATE**:
   ```powershell
-  python scripts/train.py --config configs/deberta_ate.yaml --domain tweets --output_dir models/ate_tweets_YYYYMMDD_HHMMSS
+  python scripts/train.py --config configs/deberta_ate.yaml --domain tweets
   ```
 - **ASC**:
   ```powershell
-  python scripts/train.py --config configs/deberta_asc.yaml --domain tweets --output_dir models/asc_tweets_YYYYMMDD_HHMMSS
+  python scripts/train.py --config configs/deberta_asc.yaml --domain tweets 
   ```
 - **End-to-End**:
   ```powershell
-  python scripts/train.py --config configs/bert_end_to_end.yaml --domain restaurants --output_dir models/end2end_restaurants_YYYYMMDD_HHMMSS
+  python scripts/train.py --config configs/bert_end_to_end.yaml --domain restaurants
   ```
 
 ### Evaluation

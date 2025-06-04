@@ -464,47 +464,31 @@ class ATETrainer(ABSATrainer):
             train_dataloader: Training data loader
             val_dataloader: Validation data loader
         """
-        self.logger.info("Starting ATE training...")
-        
-        # Setup optimizer and scheduler
+        # Ensure optimizer and scheduler are set up before training
         self.setup_optimizer_scheduler(train_dataloader)
-        
-        # Training loop
+        best_f1 = 0.0
+        patience = self.config['training'].get('early_stopping_patience', 3)
         for epoch in range(self.config['training']['num_epochs']):
             self.current_epoch = epoch
-            
-            # Train epoch
             train_metrics = self.train_epoch(train_dataloader)
-            self.log_metrics(train_metrics, self.global_step, 'train')
-            
-            # Validation
-            if val_dataloader:
+            self.log_metrics(train_metrics, epoch, prefix="train")
+            if val_dataloader is not None:
                 val_metrics = self.evaluate(val_dataloader)
-                self.log_metrics(val_metrics, self.global_step, 'val')
-                
-                # Save checkpoint
-                val_f1 = val_metrics['f1']
-                is_best = val_f1 > self.best_metric
-                self.save_checkpoint(epoch, val_f1, is_best)
-                
-                # Early stopping
-                if self.should_stop_early(val_f1):
+                self.log_metrics(val_metrics, epoch, prefix="val")
+                f1 = val_metrics.get('f1', 0.0)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    self.save_checkpoint(epoch, f1, is_best=True)
+                    self.early_stopping_counter = 0
+                else:
+                    self.early_stopping_counter += 1
+                if self.early_stopping_counter >= patience:
                     self.logger.info(f"Early stopping at epoch {epoch}")
                     break
             else:
-                # Save checkpoint based on training metrics
-                train_f1 = train_metrics['f1']
-                is_best = train_f1 > self.best_metric
-                self.save_checkpoint(epoch, train_f1, is_best)
-        
-        self.logger.info("Training completed!")
-        # Return training history (at least best_val_score)
-        history = {
-            'best_val_score': getattr(self, 'best_metric', None),
-            'train_metrics': getattr(self, 'train_metrics', None),
-            'val_metrics': getattr(self, 'val_metrics', None)
-        }
-        return history
+                self.save_checkpoint(epoch, train_metrics.get('f1', 0.0), is_best=True)
+        self.logger.info(f"Training finished. Best F1: {best_f1:.4f}")
+        return {'best_val_score': best_f1}
 
 
 class ASCTrainer(ABSATrainer):
