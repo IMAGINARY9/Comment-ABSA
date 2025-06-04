@@ -24,6 +24,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from models import DeBERTaATE, DeBERTaASC, BERTForABSA, EndToEndABSA
 from transformers import AutoTokenizer
 import torch.nn as nn
+import nltk
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords')
 
 def load_config(config_path):
     """Load configuration from YAML file."""
@@ -68,79 +73,90 @@ def preprocess_text(text, config):
 def predict_single_text(model, tokenizer, text, config, ate_model=None, ate_tokenizer=None, ate_config=None):
     """Predict aspects and sentiments for a single text."""
     task = config['model'].get('task', 'token_classification')
-    processed_text = preprocess_text(text, config)
+    # Use the same preprocessing as in training for ATE
+    from src.preprocessing import ABSAPreprocessor
+    preproc = ABSAPreprocessor(tokenizer_name=config['model']['name'])
+    cleaned_text = preproc.clean_text(text)
     device = next(model.parameters()).device
     with torch.no_grad():
         if task == 'token_classification' and ate_model is None:
             # ATE: Token classification (BIO tagging)
-            inputs = tokenizer(processed_text, return_tensors='pt', truncation=True, padding=True)
-            # Remove token_type_ids if present (for DeBERTa and similar models)
-            if 'token_type_ids' in inputs:
-                inputs.pop('token_type_ids')
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            outputs = model(**inputs)
-            predictions = outputs['predictions'][0].cpu().numpy()
-            tokens = tokenizer.convert_ids_to_tokens(inputs['input_ids'][0])
-            label_map = config.get('labels', ['B-ASP', 'I-ASP', 'B-OP', 'I-OP', 'O'])
-            aspects = []
-            current_aspect = []
-            for token, label_id in zip(tokens, predictions):
-                label_id_int = int(label_id)
-                if isinstance(label_map, dict):
-                    label = label_map.get(label_id_int, str(label_id_int))
-                else:
-                    label = label_map[label_id_int] if label_id_int < len(label_map) else str(label_id_int)
-                if label.startswith('B-'):
-                    if current_aspect:
-                        aspects.append(' '.join(current_aspect))
-                        current_aspect = []
-                    current_aspect = [token]
-                elif label.startswith('I-') and current_aspect:
-                    current_aspect.append(token)
-                else:
-                    if current_aspect:
-                        aspects.append(' '.join(current_aspect))
-                        current_aspect = []
-            if current_aspect:
-                aspects.append(' '.join(current_aspect))
-            aspects = [(a.replace('▁', '').replace('##', '').strip(), None) for a in aspects if a.strip()]
+            max_length = config['model'].get('max_length', 128)
+            # Use the same tokenization as in training
+            encoding = tokenizer(
+                cleaned_text,
+                truncation=True,
+                padding='max_length',
+                max_length=max_length,
+                return_tensors='pt',
+                is_split_into_words=False  # match training unless you used split words
+            )
+            if 'token_type_ids' in encoding:
+                encoding.pop('token_type_ids')
+            encoding = {k: v.to(device) for k, v in encoding.items()}
+            # Use model's extract_aspects for robust subword handling
+            aspects = model.extract_aspects(encoding['input_ids'], encoding['attention_mask'], tokenizer)[0]
+            print(f"\nExtracted aspects: {aspects}")
+            # Filter out spurious/fragmented aspects
+            filtered_aspects = []
+            for a in aspects:
+                a_clean = a.replace('▁', '').replace('##', '').strip()
+                if not a_clean or len(a_clean) < 2:
+                    continue
+                if len(a_clean) == 1 or all(c in ',.!?;:-' for c in a_clean):
+                    continue
+                filtered_aspects.append((a_clean, None))
             result = {
                 'text': text,
-                'processed_text': processed_text,
-                'aspects': aspects,
-                'confidence': float(outputs['logits'].softmax(-1).max().item()) if 'logits' in outputs else 1.0,
+                'processed_text': cleaned_text,
+                'aspects': filtered_aspects,
+                'confidence': 1.0,
                 'prediction_time': datetime.now().isoformat()
             }
         elif task == 'sequence_classification' and ate_model is not None and ate_tokenizer is not None and ate_config is not None:
-            # ATE+ASC: Use ATE model to extract aspects, then ASC model to classify sentiment
+            # Use ATE model to extract aspects from cleaned text
             ate_result = predict_single_text(ate_model, ate_tokenizer, text, ate_config)
-            aspects = [a[0] for a in ate_result['aspects'] if a[0]]
+            aspects = [a[0] for a in ate_result['aspects'] if a[0] and len(a[0].strip()) > 1]
             aspect_sentiments = []
+            max_length = config['model'].get('max_length', 128)
             for aspect in aspects:
-                input_text = f"{aspect} [SEP] {processed_text}"
-                inputs = tokenizer(input_text, return_tensors='pt', truncation=True, padding=True)
-                if 'token_type_ids' in inputs:
-                    inputs.pop('token_type_ids')
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                outputs = model(**inputs)
+                input_text = f"Aspect: {aspect}. Sentence: {cleaned_text}"
+                encoding = tokenizer(
+                    input_text,
+                    truncation=True,
+                    padding='max_length',
+                    max_length=max_length,
+                    return_tensors='pt'
+                )
+                if 'token_type_ids' in encoding:
+                    encoding.pop('token_type_ids')
+                encoding = {k: v.to(device) for k, v in encoding.items()}
+                outputs = model(**encoding)
                 pred = outputs['predictions'].item() if hasattr(outputs['predictions'], 'item') else int(outputs['predictions'][0])
                 sentiment_map = config.get('labels', ['negative', 'neutral', 'positive'])
                 sentiment = sentiment_map[pred] if pred < len(sentiment_map) else str(pred)
                 aspect_sentiments.append((aspect, sentiment))
             result = {
                 'text': text,
-                'processed_text': processed_text,
+                'processed_text': cleaned_text,
                 'aspects': aspect_sentiments,
                 'confidence': float(np.mean([outputs['logits'].softmax(-1).max().item() for _ in aspect_sentiments])) if aspect_sentiments else 1.0,
                 'prediction_time': datetime.now().isoformat()
             }
         elif task == 'absa_end_to_end':
             # End-to-end: extract aspects and classify sentiment
-            inputs = tokenizer(processed_text, return_tensors='pt', truncation=True, padding=True)
-            if 'token_type_ids' in inputs:
-                inputs.pop('token_type_ids')
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            outputs = model(**inputs)
+            max_length = config['model'].get('max_length', 128)
+            encoding = tokenizer(
+                cleaned_text,
+                truncation=True,
+                padding='max_length',
+                max_length=max_length,
+                return_tensors='pt'
+            )
+            if 'token_type_ids' in encoding:
+                encoding.pop('token_type_ids')
+            encoding = {k: v.to(device) for k, v in encoding.items()}
+            outputs = model(**encoding)
             # Robustly handle model outputs
             aspect_logits = outputs.get('aspect_logits', None)
             sentiment_logits = outputs.get('sentiment_logits', None)
@@ -171,7 +187,7 @@ def predict_single_text(model, tokenizer, text, config, ate_model=None, ate_toke
                 aspects.append((aspect_name, sentiment))
             result = {
                 'text': text,
-                'processed_text': processed_text,
+                'processed_text': cleaned_text,
                 'aspects': aspects,
                 'confidence': float(aspect_probs.max().item()),
                 'prediction_time': datetime.now().isoformat()
@@ -301,16 +317,16 @@ def main():
             print("[WARNING] For ASC models, provide --ate_model_path and --ate_config for ATE+ASC pipeline.")
 
     if args.text:
-        print("\n🔍 Analyzing single text...")
+        print("\nAnalyzing single text...")
         prediction = predict_single_text(model, tokenizer, args.text, config, ate_model=ate_model, ate_tokenizer=ate_tokenizer, ate_config=ate_config)
-        print("\n📊 Prediction Results:")
+        print("\nPrediction Results:")
         print("=" * 50)
         print(format_prediction_output(prediction))
     else:
-        print(f"\n🔍 Loading texts from: {args.input_file}")
+        print(f"\nLoading texts from: {args.input_file}")
         texts = load_input_file(args.input_file)
         print(f"Loaded {len(texts)} texts for analysis")
-        print("\n📊 Starting batch prediction...")
+        print("\nStarting batch prediction...")
         predictions = [predict_single_text(model, tokenizer, text, config, ate_model=ate_model, ate_tokenizer=ate_tokenizer, ate_config=ate_config) for text in texts]
         # Determine output file extension
         if args.output_file:
@@ -320,11 +336,11 @@ def main():
         save_batch_predictions(predictions, output_path)
         total_aspects = sum(len(pred['aspects']) for pred in predictions)
         avg_confidence = np.mean([pred['confidence'] for pred in predictions])
-        print(f"\n✅ Batch prediction completed!")
-        print(f"📝 Processed: {len(predictions)} texts")
-        print(f"🎯 Total aspects detected: {total_aspects}")
-        print(f"📈 Average confidence: {avg_confidence:.3f}")
-        print(f"💾 Results saved to: {output_path}")
+        print(f"\nBatch prediction completed!")
+        print(f"Processed: {len(predictions)} texts")
+        print(f"Total aspects detected: {total_aspects}")
+        print(f"Average confidence: {avg_confidence:.3f}")
+        print(f"Results saved to: {output_path}")
 
 if __name__ == "__main__":
     main()

@@ -18,19 +18,51 @@ A modular, robust, and extensible pipeline for Aspect-Based Sentiment Analysis (
 ## Project Structure
 
 ```
-comment-absa/
-├── data/                # Raw, preprocessed, and split datasets (per domain)
-├── src/                 # Source code (models, training, utils, preprocessing)
-├── scripts/             # Training, evaluation, and prediction scripts
-├── configs/             # YAML config files for all model types
-├── models/              # Saved checkpoints and best models
-├── logs/                # Training logs (per model type)
-├── reports/             # Evaluation reports and plots
-├── notebooks/           # Data cleaning, exploration, and reference notebooks
-├── outputs/             # Output configs and training histories
-├── visualizations/      # Analysis and plots
-├── tests/               # Unit tests
-└── requirements.txt     # Python dependencies
+Comment-ABSA/
+├── activate.bat
+├── README.md
+├── requirements.txt
+├── setup.bat / setup.ps1 / setup.py
+├── configs/           # YAML config files for all model types and domains
+│   ├── bert_end_to_end.yaml
+│   ├── deberta_asc.yaml
+│   ├── deberta_ate.yaml
+│   └── ...
+├── data/              # Raw, preprocessed, and split datasets (per domain)
+│   ├── raw/
+│   ├── preprocessed/
+│   ├── processed/
+│   ├── splits/
+│   └── ...
+├── src/               # Source code (models, training, utils, preprocessing)
+│   ├── absa_trainer.py
+│   ├── data_utils.py
+│   ├── evaluation.py
+│   ├── models.py
+│   ├── preprocessing.py
+│   ├── training.py
+│   └── ...
+├── scripts/           # Entry-point scripts for training, evaluation, prediction
+│   ├── train.py
+│   ├── evaluate.py
+│   └── predict.py
+├── models/            # Saved checkpoints and best models (per run/domain)
+│   ├── asc_tweets_*/
+│   ├── ate_tweets_*/
+│   ├── end2end_restaurants_*/
+│   ├── checkpoints/
+│   └── final/
+├── logs/              # Training logs (per model type and run)
+│   ├── asc/
+│   ├── ate/
+│   ├── end2end/
+│   └── ...
+├── reports/           # Evaluation reports and plots
+│   └── evaluation/
+├── outputs/           # Output configs and training histories
+├── notebooks/         # Data cleaning, exploration, and reference notebooks
+├── tests/             # Unit tests
+└── visualizations/    # Analysis and plots
 ```
 
 ---
@@ -54,6 +86,8 @@ comment-absa/
 
 ### Training & Evaluation
 - **Config-driven**: All scripts accept a `--config` argument (YAML).
+- **Domain-specific**: Use `--domain` to specify the dataset domain (e.g., `laptops`, `restaurants`, `tweets`).
+- **Output directory**: Use `--output_dir` to specify where to save model checkpoints.
 - **Logging**: Logs saved in `logs/{ate,asc,end2end}/`.
 - **Checkpoints**: Saved in `models/{ate,asc,end2end}/`.
 - **Evaluation**: Reports and plots in `reports/evaluation/`.
@@ -96,18 +130,33 @@ source venv/bin/activate
 
 ### Data Preparation
 - Place raw data in `data/raw/` or use provided scripts/notebooks for cleaning.
-- Preprocess and split: `python scripts/prepare_absa_data.py`
+- Preprocess and split: *(see notebooks or custom scripts for data preparation)*
 
 ### Training
-- **ATE**: `python scripts/train.py --config configs/deberta_ate.yaml`
-- **ASC**: `python scripts/train.py --config configs/deberta_asc.yaml`
-- **End-to-End**: `python scripts/train.py --config configs/bert_end_to_end.yaml`
+- **ATE**:
+  ```powershell
+  python scripts/train.py --config configs/deberta_ate.yaml --domain tweets --output_dir models/ate_tweets_YYYYMMDD_HHMMSS
+  ```
+- **ASC**:
+  ```powershell
+  python scripts/train.py --config configs/deberta_asc.yaml --domain tweets --output_dir models/asc_tweets_YYYYMMDD_HHMMSS
+  ```
+- **End-to-End**:
+  ```powershell
+  python scripts/train.py --config configs/bert_end_to_end.yaml --domain restaurants --output_dir models/end2end_restaurants_YYYYMMDD_HHMMSS
+  ```
 
 ### Evaluation
-- `python scripts/evaluate.py --config configs/bert_end_to_end.yaml`
+- Evaluate a trained model:
+  ```powershell
+  python scripts/evaluate.py --config configs/bert_end_to_end.yaml --domain restaurants --model_dir models/end2end_restaurants_YYYYMMDD_HHMMSS
+  ```
 
 ### Prediction
-- `python scripts/predict.py --config configs/bert_end_to_end.yaml --input <input_file> --output <output_file>`
+- Predict on new data:
+  ```powershell
+  python scripts/predict.py --config configs/bert_end_to_end.yaml --domain restaurants --model_dir models/end2end_restaurants_YYYYMMDD_HHMMSS --input <input_file> --output <output_file>
+  ```
 
 ---
 

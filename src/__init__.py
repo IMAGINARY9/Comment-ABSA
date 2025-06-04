@@ -15,7 +15,6 @@ from .models import (
 )
 from .training import ABSATrainer, ATETrainer, ASCTrainer
 from .evaluation import ABSAEvaluator
-from .visualization import ABSAVisualizer
 
 __all__ = [
     "ABSAPreprocessor",
@@ -27,6 +26,5 @@ __all__ = [
     "ABSATrainer",
     "ATETrainer",
     "ASCTrainer", 
-    "ABSAEvaluator",
-    "ABSAVisualizer"
+    "ABSAEvaluator"
 ]

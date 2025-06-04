@@ -19,6 +19,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score
 import warnings
+from transformers import AutoTokenizer
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from models import DeBERTaATE, DeBERTaASC, BERTForABSA, EndToEndABSA
+from preprocessing import ABSAPreprocessor, collate_end2end_absa_batch
+from torch.utils.data import DataLoader
+from sklearn.metrics import precision_recall_fscore_support
+
 warnings.filterwarnings('ignore')
 
 def load_config(config_path):
@@ -26,7 +34,7 @@ def load_config(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-def evaluate_ate_model(model, test_loader, device):
+def evaluate_ate_model(model, test_loader, device, tokenizer):
     """Evaluate Aspect Term Extraction model."""
     model.eval()
     all_predictions = []
@@ -34,14 +42,32 @@ def evaluate_ate_model(model, test_loader, device):
     
     with torch.no_grad():
         for batch in test_loader:
-            # Implementation would depend on actual model structure
-            pass
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            predictions = outputs['predictions']
+            if isinstance(predictions, list):
+                for pred_seq, label_seq, mask in zip(predictions, labels, batch['attention_mask']):
+                    valid_length = mask.sum().item()
+                    all_predictions.extend(pred_seq[:valid_length])
+                    valid_labels = label_seq[:valid_length]
+                    valid_labels = valid_labels[valid_labels != -100]
+                    all_labels.extend(valid_labels.cpu().numpy())
+            else:
+                active_mask = batch['attention_mask'].view(-1) == 1
+                active_labels = labels.view(-1)[active_mask]
+                active_predictions = predictions.view(-1)[active_mask]
+                valid_mask = active_labels != -100
+                all_predictions.extend(active_predictions[valid_mask].cpu().numpy())
+                all_labels.extend(active_labels[valid_mask].cpu().numpy())
     
     # Calculate ATE metrics
+    precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_predictions, average='weighted', zero_division=0)
     ate_metrics = {
-        'precision': 0.0,
-        'recall': 0.0,
-        'f1_score': 0.0
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1
     }
     
     return ate_metrics, all_predictions, all_labels
@@ -54,14 +80,22 @@ def evaluate_asc_model(model, test_loader, device):
     
     with torch.no_grad():
         for batch in test_loader:
-            # Implementation would depend on actual model structure
-            pass
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            predictions = outputs['predictions']
+            all_predictions.extend(predictions.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     
     # Calculate ASC metrics
+    accuracy = accuracy_score(all_labels, all_predictions)
+    f1_macro = f1_score(all_labels, all_predictions, average='macro', zero_division=0)
+    f1_weighted = f1_score(all_labels, all_predictions, average='weighted', zero_division=0)
     asc_metrics = {
-        'accuracy': 0.0,
-        'f1_macro': 0.0,
-        'f1_weighted': 0.0
+        'accuracy': accuracy,
+        'f1_macro': f1_macro,
+        'f1_weighted': f1_weighted
     }
     
     return asc_metrics, all_predictions, all_labels
@@ -171,6 +205,30 @@ def generate_evaluation_report(metrics, output_path, plot_paths=None, error_anal
     with open(output_path, 'w') as f:
         f.write(report)
 
+def load_model(model_path, config, device):
+    task = config['model'].get('task', 'token_classification')
+    model_name = config['model']['name']
+    if task == 'token_classification':
+        model = DeBERTaATE(config)
+    elif task == 'sequence_classification':
+        model = DeBERTaASC(config)
+    elif task == 'absa_end_to_end':
+        if 'bert' in model_name.lower():
+            model = BERTForABSA(config)
+        else:
+            model = EndToEndABSA(config)
+    else:
+        raise ValueError(f"Unsupported task: {task}")
+    model = model.to(device)
+    checkpoint = torch.load(model_path, map_location=device)
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint)
+    model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    return model, tokenizer
+
 def main():
     parser = argparse.ArgumentParser(description='Evaluate ABSA model')
     parser.add_argument('--model_path', type=str, required=True, help='Path to trained model')
@@ -180,10 +238,7 @@ def main():
     parser.add_argument('--plots_dir', type=str, default='reports/figures', help='Directory to save plots')
     args = parser.parse_args()
 
-    # Load configuration
     config = load_config(args.config)
-
-    # Infer model_type from config
     model_type = None
     task = config.get('model', {}).get('task', '')
     if task == 'token_classification':
@@ -199,29 +254,44 @@ def main():
     print(f"Model type: {model_type}")
     print(f"Configuration: {args.config}")
 
-    # Load model and data (implementation depends on actual model structure)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Evaluate based on model type
+    model, tokenizer = load_model(args.model_path, config, device)
+
+    # Prepare data
+    preprocessor = ABSAPreprocessor(
+        task=model_type,
+        tokenizer_name=config['model']['name']
+    )
     if model_type == 'ate':
         print("Evaluating Aspect Term Extraction model...")
-        # metrics, predictions, labels = evaluate_ate_model(model, test_loader, device)
-        metrics = {'ate_precision': 0.85, 'ate_recall': 0.82, 'ate_f1': 0.83}
-        # Demo predictions/labels for plotting
-        predictions = [0, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1]
-        labels =      [0, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1]
+        test_data = preprocessor.load_ate_data(
+            data_dir=args.data_dir,
+            train_size=config['data']['train_size'],
+            val_size=config['data']['val_size'],
+            test_size=config['data']['test_size']
+        )[2]
+        test_loader = DataLoader(test_data, batch_size=16, shuffle=False)
+        metrics, predictions, labels = evaluate_ate_model(model, test_loader, device, tokenizer)
     elif model_type == 'asc':
         print("Evaluating Aspect Sentiment Classification model...")
-        # metrics, predictions, labels = evaluate_asc_model(model, test_loader, device)
-        metrics = {'asc_accuracy': 0.88, 'asc_f1_macro': 0.86, 'asc_f1_weighted': 0.87}
-        predictions = [0, 1, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0]
-        labels =      [0, 1, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0]
+        test_data = preprocessor.load_asc_data(
+            data_dir=args.data_dir,
+            train_size=config['data']['train_size'],
+            val_size=config['data']['val_size'],
+            test_size=config['data']['test_size']
+        )[2]
+        test_loader = DataLoader(test_data, batch_size=16, shuffle=False)
+        metrics, predictions, labels = evaluate_asc_model(model, test_loader, device)
     else:
         print("Evaluating End-to-End ABSA model...")
-        # metrics, predictions, labels = evaluate_end_to_end_model(model, test_loader, device)
-        metrics = {'e2e_exact_match': 0.75, 'e2e_aspect_f1': 0.80, 'e2e_sentiment_f1': 0.78}
-        predictions = [0, 1, 1, 2, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0]
-        labels =      [0, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1]
+        test_data = preprocessor.load_end_to_end_data(
+            data_dir=args.data_dir,
+            train_size=config['data']['train_size'],
+            val_size=config['data']['val_size'],
+            test_size=config['data']['test_size']
+        )[2]
+        test_loader = DataLoader(test_data, batch_size=16, shuffle=False)
+        metrics, predictions, labels = evaluate_end_to_end_model(model, test_loader, device)
 
     # Create output directory
     output_dir = Path(args.output_dir)

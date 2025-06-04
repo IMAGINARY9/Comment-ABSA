@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "shell",
+			"label": "Train ATE model (tweets)",
+			"command": "python scripts/train.py --config configs/deberta_ate.yaml --domain tweets --output_dir models/ate_tweets_retrain_$(Get-Date -Format yyyyMMdd_HHmmss)",
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": [
+				"$python"
+			]
+		}
+	]
+}

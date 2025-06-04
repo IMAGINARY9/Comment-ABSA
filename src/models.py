@@ -213,7 +213,7 @@ class DeBERTaASC(nn.Module):
     def _apply_lora(self, lora_config: Dict):
         """Apply LoRA to the model for efficient fine-tuning."""
         peft_config = LoraConfig(
-            task_type=TaskType.SEQ_CLS,
+            task_type=TaskType.FEATURE_EXTRACTION,
             inference_mode=False,
             r=lora_config['r'],
             lora_alpha=lora_config['lora_alpha'],
@@ -228,16 +228,13 @@ class DeBERTaASC(nn.Module):
             input_ids=input_ids,
             attention_mask=attention_mask
         )
-        
         pooled_output = outputs.last_hidden_state[:, 0]  # [CLS] token
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
-        
         loss = None
         if labels is not None:
             loss_fct = nn.CrossEntropyLoss(weight=self.class_weights)
             loss = loss_fct(logits, labels)
-        
         return {
             'loss': loss,
             'logits': logits,

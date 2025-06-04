@@ -27,15 +27,26 @@ import seaborn as sns
 from collections import defaultdict
 import time
 import os
-
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from models import DeBERTaATE, DeBERTaASC, BERTForABSA, EndToEndABSA
 from preprocessing import ABSADataset, ABSADataLoader
 
 
 # Utility function to filter batch for model
 def filter_model_inputs(batch):
-    # Only keep keys that are accepted by the model (input_ids, attention_mask, labels, aspect_labels, sentiment_labels)
-    allowed = {'input_ids', 'attention_mask', 'labels', 'aspect_labels', 'sentiment_labels'}
+    # Only keep keys that are accepted by the model (input_ids, attention_mask, labels)
+    # For ASC, do NOT pass 'labels' to the backbone if using LoRA/PEFT
+    allowed = {'input_ids', 'attention_mask'}
+    # For ATE, allow 'labels' if using LoRA/PEFT (token classification)
+    # For ASC, only pass 'labels' to the model head, not the backbone
+    if 'labels' in batch:
+        allowed.add('labels')
+    if 'aspect_labels' in batch:
+        allowed.add('aspect_labels'
+        )
+    if 'sentiment_labels' in batch:
+        allowed.add('sentiment_labels')
     return {k: v for k, v in batch.items() if k in allowed}
 
 
@@ -224,7 +235,7 @@ class ABSATrainer:
         """
         # Log to console
         def format_metric(k, v):
-            if isinstance(v, (float, int)):
+            if isinstance(v, float):
                 return f"{k}: {v:.4f}"
             return f"{k}: {v}"
         metric_str = " | ".join([format_metric(k, v) for k, v in metrics.items()])
@@ -254,7 +265,7 @@ class ABSATrainer:
             return False
         else:
             self.early_stopping_counter += 1
-            return self.early_stopping_counter >= patience
+            return self.early_stopping_counter >= self.config['training'].get('patience', 5)
 
 
 class ATETrainer(ABSATrainer):
@@ -529,11 +540,11 @@ class ASCTrainer(ABSATrainer):
         for batch_idx, batch in enumerate(progress_bar):
             # Move batch to device
             batch = {k: v.to(self.device) for k, v in batch.items()}
-            batch = filter_model_inputs(batch)
-            
-            # Forward pass
-            outputs = self.model(**batch)
-            
+            # Only pass input_ids and attention_mask to the backbone, labels to the model head
+            input_ids = batch['input_ids']
+            attention_mask = batch['attention_mask']
+            labels = batch['labels'] if 'labels' in batch else None
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs['loss']
             predictions = outputs['predictions']
             

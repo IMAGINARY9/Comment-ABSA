@@ -251,10 +251,18 @@ def evaluate_model(
 ) -> Dict[str, Any]:
     """Evaluate the trained model."""
     logging.info("Starting evaluation...")
-    
+
+    task_map = {
+        "token_classification": "ate",
+        "sequence_classification": "asc",
+        "absa_end_to_end": "end_to_end"
+    }
+    evaluator_task_key = config['model']['task']
+    evaluator_task = task_map.get(evaluator_task_key, evaluator_task_key)
+
     evaluator = ABSAEvaluator(
-        task=config['model']['task'],
-        label_names=list(config.get('labels', {}).keys()) if 'labels' in config else None
+        task=evaluator_task,  # Use the mapped task
+        label_names=list(config.get('labels', {}).keys()) if 'labels' in config and config.get('labels') else None
     )
     
     # Evaluate the model
