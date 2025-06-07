@@ -23,6 +23,9 @@ from collections import Counter
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
 
+# Import the NER utility
+from ner_utils import CommentABSANERExtractor  # Assuming ner_utils.py is in the same directory
+
 # Download NLTK data if not present
 try:
     nltk.data.find('tokenizers/punkt')
@@ -43,18 +46,42 @@ class ABSAPreprocessor:
     for both ATE (token classification) and ASC (sequence classification).
     """
     
-    def __init__(self, task: str = "ate", tokenizer_name: str = "microsoft/deberta-v3-base"):
+    def __init__(self, task: str = "ate", tokenizer_name: str = "microsoft/deberta-v3-base", ner_model_path: Optional[str] = None, ner_word_tokenizer_path: Optional[str] = None, ner_tag_vocab_path: Optional[str] = None, ner_max_seq_length: int = 128):
         """
         Initialize preprocessor.
         
         Args:
-            task: Task type ('ate', 'asc', 'end_to_end')
+            task: Task type (\'ate\', \'asc\', \'end_to_end\')
             tokenizer_name: Name of the tokenizer to use
+            ner_model_path: Path to the trained NER Keras model.
+            ner_word_tokenizer_path: Path to the Keras Tokenizer JSON for NER.
+            ner_tag_vocab_path: Path to the JSON file for NER tag vocabulary.
+            ner_max_seq_length: Max sequence length for the NER model.
         """
         self.task = task
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.logger = logging.getLogger(__name__)
-        
+          # Initialize NER Extractor if paths are provided
+        self.ner_extractor = None
+        self.ner_tag_vocab = None
+        if ner_model_path and ner_word_tokenizer_path and ner_tag_vocab_path:
+            try:
+                self.ner_extractor = CommentABSANERExtractor(
+                    model_path=ner_model_path,
+                    word_tokenizer_path=ner_word_tokenizer_path,
+                    tag_vocab_path=ner_tag_vocab_path,
+                    ner_max_seq_length=ner_max_seq_length
+                )
+                # Load NER tag vocabulary for ID mapping
+                import json
+                with open(ner_tag_vocab_path, 'r', encoding='utf-8') as f:
+                    self.ner_tag_vocab = json.load(f)
+                self.logger.info("NER Extractor initialized successfully.")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize NER Extractor: {e}")
+        else:
+            self.logger.info("NER Extractor paths not provided, NER features will not be used.")
+
         # Load spaCy model for advanced processing
         try:
             import spacy
@@ -184,34 +211,84 @@ class ABSAPreprocessor:
         import torch
         tokenized_inputs = []
         labels = []
-        
+        all_ner_tags_for_batch = [] # To store NER tags for the batch
+
         for text, aspects in zip(texts, aspects_list):
             cleaned = self.clean_text(text)
-            bio_tags = self.create_bio_tags(cleaned, aspects)
-            tokens = word_tokenize(cleaned.lower())
+            
+            # Get NER tags if extractor is available
+            ner_tokens = []
+            ner_tags = []
+            if self.ner_extractor:
+                try:
+                    ner_tokens, ner_tags = self.ner_extractor.predict_ner_tags(cleaned)
+                    # Ensure ner_tags align with word_tokenize(cleaned.lower())
+                    # This might require careful alignment if tokenization differs significantly
+                except Exception as e:
+                    self.logger.warning(f"NER prediction failed for text: \'{cleaned[:50]}...\'. Error: {e}")
+                    ner_tags = [] # Fallback to no NER tags
+
+            bio_tags = self.create_bio_tags(cleaned, aspects) # These are based on word_tokenize(cleaned.lower())
+            tokens = word_tokenize(cleaned.lower()) # ABSA tokenizer's tokens            # Align NER tags with ABSA tokens (this is a crucial and potentially complex step)
+            # For simplicity, we'll assume a direct mapping if token counts are similar,
+            # otherwise, we might need a more sophisticated alignment or just use 'O' for NER.
+            aligned_ner_tags = []
+            if ner_tags and len(ner_tokens) == len(tokens): # Simple check
+                aligned_ner_tags = ner_tags
+            elif ner_tags and len(ner_tokens) > 0: # Attempt simple alignment
+                # Try to align by finding the best matching tokens
+                aligned_ner_tags = self._align_ner_tags_with_absa_tokens(ner_tokens, ner_tags, tokens)
+            else: # Fallback if tokenization mismatch or no NER tags
+                aligned_ner_tags = ['O'] * len(tokens)
+            
+            all_ner_tags_for_batch.append(aligned_ner_tags)
+
             encoding = self.tokenizer(tokens, is_split_into_words=True, truncation=True, padding='max_length', max_length=max_length, return_tensors='pt')
             label_ids = []
+            # We need a vocabulary for NER tags if we want to convert them to IDs
+            # For now, let's assume we'll handle NER tags as a separate input or find a way to map them.
+            # This part needs further refinement based on how NER tags will be consumed by the model.
+            # Placeholder: ner_tag_ids = [self.ner_tag_to_id.get(tag, 0) for tag in aligned_ner_tags_for_word]
+
             word_ids = encoding.word_ids(batch_index=0)
+            current_ner_tag_ids_for_encoding = [] # For this specific encoding
+
             for word_idx in word_ids:
                 if word_idx is None:
                     label_ids.append(-100)
-                elif word_idx < len(bio_tags):
+                    current_ner_tag_ids_for_encoding.append(-100) # Corresponding NER tag padding
+                elif word_idx < len(bio_tags): # Ensure word_idx is within bounds for bio_tags
                     tag = bio_tags[word_idx]
-                    label_ids.append({'B-ASP': 0, 'I-ASP': 1, 'O': 4}.get(tag, 4))
-                else:
+                    label_ids.append({'B-ASP': 0, 'I-ASP': 1, 'O': 4}.get(tag, 4)) # Make sure your ABSA model uses these IDs                    # NER tag for the current word_idx
+                    # This assumes aligned_ner_tags has one tag per token from word_tokenize(cleaned.lower())
+                    if word_idx < len(aligned_ner_tags):
+                        ner_tag_for_word = aligned_ner_tags[word_idx]
+                        # Convert ner_tag_for_word to an ID using the NER tag vocabulary
+                        if self.ner_tag_vocab:
+                            current_ner_tag_ids_for_encoding.append(self.ner_tag_vocab.get(ner_tag_for_word, self.ner_tag_vocab.get('O', 2)))
+                        else:
+                            current_ner_tag_ids_for_encoding.append(2)  # Default to 'O' tag ID
+                    else:
+                        current_ner_tag_ids_for_encoding.append(-100) # Pad if out of bounds
+                else: # word_idx is out of bounds for bio_tags (e.g. special tokens not aligned to words)
                     label_ids.append(-100)
+                    current_ner_tag_ids_for_encoding.append(-100)
+            
             encoding['labels'] = torch.tensor(label_ids)
+            encoding['ner_tags'] = torch.tensor(current_ner_tag_ids_for_encoding) # Add NER tags to the encoding
             tokenized_inputs.append(encoding)
-            labels.append(label_ids)
-        
+            # labels.append(label_ids) # This 'labels' list seems redundant if using encoding['labels']
+
         input_ids = torch.cat([x['input_ids'] for x in tokenized_inputs], dim=0)
         attention_mask = torch.cat([x['attention_mask'] for x in tokenized_inputs], dim=0)
         labels_tensor = torch.stack([x['labels'] for x in tokenized_inputs])
-        
+        ner_tags_tensor = torch.stack([x['ner_tags'] for x in tokenized_inputs]) # Stack NER tags
+
         return {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
-            'labels': labels_tensor
+            'labels': labels_tensor,
+            'ner_tags': ner_tags_tensor # Return NER tags as part of the prepared data
         }
     
     def prepare_asc_data(self, texts: List[str], aspects: List[str], 
@@ -482,14 +559,20 @@ class ABSAPreprocessor:
                 if len(label_ids) >= max_length:
                     return label_ids[:max_length]
                 return label_ids + [-100] * (max_length - len(label_ids))
+            
             def __len__(self):
                 return len(self.texts)
+            
             def __getitem__(self, idx):
-                return {
+                item = {
                     'input_ids': self.data['input_ids'][idx],
                     'attention_mask': self.data['attention_mask'][idx],
                     'labels': self.data['labels'][idx]
                 }
+                # Include NER tags if available in the prepared data
+                if 'ner_tags' in self.data:
+                    item['ner_tags'] = self.data['ner_tags'][idx]
+                return item
         train_df = pd.read_csv(f"{data_dir}/train.csv")
         val_df = pd.read_csv(f"{data_dir}/val.csv")
         test_df = pd.read_csv(f"{data_dir}/test.csv")
@@ -626,8 +709,70 @@ class ABSAPreprocessor:
         val_data = EndToEndABSADataset(val_df, self.tokenizer, max_length, aspect_cat_map, num_sentiment_labels)
         test_data = EndToEndABSADataset(test_df, self.tokenizer, max_length, aspect_cat_map, num_sentiment_labels)
         return train_data, val_data, test_data
-        
 
+    def _align_ner_tags_with_absa_tokens(self, ner_tokens: List[str], ner_tags: List[str], absa_tokens: List[str]) -> List[str]:
+        """
+        Align NER tags with ABSA tokens using longest common subsequence approach.
+        
+        Args:
+            ner_tokens: Tokens from NER tokenization
+            ner_tags: NER tags corresponding to ner_tokens
+            absa_tokens: Tokens from ABSA tokenization
+            
+        Returns:
+            List of NER tags aligned with ABSA tokens
+        """
+        if len(ner_tokens) == len(absa_tokens):
+            return ner_tags
+            
+        aligned_tags = []
+        ner_idx = 0
+        
+        for absa_token in absa_tokens:
+            if ner_idx < len(ner_tokens):
+                ner_token = ner_tokens[ner_idx]
+                
+                # Exact match
+                if absa_token.lower() == ner_token.lower():
+                    aligned_tags.append(ner_tags[ner_idx])
+                    ner_idx += 1
+                # ABSA token is substring of NER token (NER token was split)
+                elif ner_token.lower().startswith(absa_token.lower()):
+                    aligned_tags.append(ner_tags[ner_idx])
+                    # Don't increment ner_idx yet, might need it for next ABSA token
+                # NER token is substring of ABSA token (multiple NER tokens combined)
+                elif absa_token.lower().startswith(ner_token.lower()):
+                    aligned_tags.append(ner_tags[ner_idx])
+                    ner_idx += 1
+                    # Try to consume more NER tokens if they continue the ABSA token
+                    while (ner_idx < len(ner_tokens) and 
+                           absa_token.lower().find(ner_tokens[ner_idx].lower()) != -1):
+                        ner_idx += 1
+                # Fuzzy match - look ahead for similar tokens
+                else:
+                    found_match = False
+                    for lookahead in range(min(3, len(ner_tokens) - ner_idx)):
+                        if ner_tokens[ner_idx + lookahead].lower() == absa_token.lower():
+                            # Use the tag from the matched token
+                            aligned_tags.append(ner_tags[ner_idx + lookahead])
+                            ner_idx = ner_idx + lookahead + 1
+                            found_match = True
+                            break
+                    
+                    if not found_match:
+                        # No good match found, use 'O' tag
+                        aligned_tags.append('O')
+                        # Advance ner_idx conservatively
+                        if ner_idx < len(ner_tokens) - 1:
+                            ner_idx += 1
+            else:
+                # No more NER tokens, use 'O'
+                aligned_tags.append('O')
+        
+        return aligned_tags
+
+    # ...existing code...
+        
 class ABSADataset(Dataset):
     """
     PyTorch Dataset for ABSA tasks.
@@ -645,16 +790,25 @@ class ABSADataset(Dataset):
         self.input_ids = data['input_ids']
         self.attention_mask = data['attention_mask']
         self.labels = data['labels']
+        
+        # Include NER tags if available
+        self.ner_tags = data.get('ner_tags', None)
     
     def __len__(self):
         return len(self.input_ids)
     
     def __getitem__(self, idx):
-        return {
+        item = {
             'input_ids': self.input_ids[idx],
             'attention_mask': self.attention_mask[idx],
             'labels': self.labels[idx]
         }
+        
+        # Include NER tags if available
+        if self.ner_tags is not None:
+            item['ner_tags'] = self.ner_tags[idx]
+            
+        return item
 
 
 class ABSADataLoader:

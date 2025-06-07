@@ -22,6 +22,7 @@ conllu>=4.5.2  # For CoNLL-U format
 xmltodict>=0.13.0  # For XML dataset parsing
 lxml>=4.9.0
 pyyaml>=6.0
+tensorflow>=2.13.0  # For TensorFlow-based modelsshoul
 tensorboard>=2.13.0
 jupyter>=1.0.0
 ipywidgets>=8.0.0

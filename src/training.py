@@ -35,7 +35,7 @@ from preprocessing import ABSADataset, ABSADataLoader
 
 # Utility function to filter batch for model
 def filter_model_inputs(batch):
-    # Only keep keys that are accepted by the model (input_ids, attention_mask, labels)
+    # Only keep keys that are accepted by the model (input_ids, attention_mask, labels, ner_tags)
     # For ASC, do NOT pass 'labels' to the backbone if using LoRA/PEFT
     allowed = {'input_ids', 'attention_mask'}
     # For ATE, allow 'labels' if using LoRA/PEFT (token classification)
@@ -47,6 +47,9 @@ def filter_model_inputs(batch):
         )
     if 'sentiment_labels' in batch:
         allowed.add('sentiment_labels')
+    # Add NER tags for models that support NER integration
+    if 'ner_tags' in batch:
+        allowed.add('ner_tags')
     return {k: v for k, v in batch.items() if k in allowed}
 
 

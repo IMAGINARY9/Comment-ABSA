@@ -74,7 +74,21 @@ def predict_single_text(model, tokenizer, text, config, ate_model=None, ate_toke
     """Predict aspects and sentiments for a single text."""
     task = config['model'].get('task', 'token_classification')
     from src.preprocessing import ABSAPreprocessor
-    preproc = ABSAPreprocessor(tokenizer_name=config['model']['name'])
+    
+    # Get NER configuration if available
+    model_config = config.get('model', {})
+    ner_model_path = model_config.get('ner_model_path') if model_config.get('use_ner_features', False) else None
+    ner_word_tokenizer_path = model_config.get('ner_word_tokenizer_path') if model_config.get('use_ner_features', False) else None
+    ner_tag_vocab_path = model_config.get('ner_tag_vocab_path') if model_config.get('use_ner_features', False) else None
+    ner_max_seq_length = model_config.get('ner_max_seq_length', 128)
+    
+    preproc = ABSAPreprocessor(
+        tokenizer_name=config['model']['name'],
+        ner_model_path=ner_model_path,
+        ner_word_tokenizer_path=ner_word_tokenizer_path,
+        ner_tag_vocab_path=ner_tag_vocab_path,
+        ner_max_seq_length=ner_max_seq_length
+    )
     cleaned_text = preproc.clean_text(text)
     device = next(model.parameters()).device
     with torch.no_grad():

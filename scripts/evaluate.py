@@ -24,6 +24,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from models import DeBERTaATE, DeBERTaASC, BERTForABSA, EndToEndABSA
 from preprocessing import ABSAPreprocessor, collate_end2end_absa_batch
+from training import filter_model_inputs
 from torch.utils.data import DataLoader
 from sklearn.metrics import precision_recall_fscore_support
 import os
@@ -43,11 +44,15 @@ def evaluate_ate_model(model, test_loader, device, tokenizer):
     
     with torch.no_grad():
         for batch in test_loader:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            # Move batch to device
+            batch = {k: v.to(device) for k, v in batch.items()}
+            # Filter batch inputs to include only what the model expects
+            batch = filter_model_inputs(batch)
+            
+            outputs = model(**batch)
             predictions = outputs['predictions']
+            labels = batch['labels']
+            
             if isinstance(predictions, list):
                 for pred_seq, label_seq, mask in zip(predictions, labels, batch['attention_mask']):
                     valid_length = mask.sum().item()
@@ -81,13 +86,15 @@ def evaluate_asc_model(model, test_loader, device):
     
     with torch.no_grad():
         for batch in test_loader:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            # Move batch to device
+            batch = {k: v.to(device) for k, v in batch.items()}
+            # Filter batch inputs to include only what the model expects
+            batch = filter_model_inputs(batch)
+            
+            outputs = model(**batch)
             predictions = outputs['predictions']
             all_predictions.extend(predictions.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            all_labels.extend(batch['labels'].cpu().numpy())
     
     # Calculate ASC metrics
     accuracy = accuracy_score(all_labels, all_predictions)
@@ -271,12 +278,15 @@ def main():
             data_dir = os.path.join('data', 'splits', domain)
         print(f"Auto-selected data_dir: {data_dir}")
     else:
-        print(f"Using provided data_dir: {data_dir}")
-
-    # Prepare data
+        print(f"Using provided data_dir: {data_dir}")    # Prepare data
+    model_config = config.get('model', {})
     preprocessor = ABSAPreprocessor(
         task=model_type,
-        tokenizer_name=config['model']['name']
+        tokenizer_name=config['model']['name'],
+        ner_model_path=model_config.get('ner_model_path') if model_config.get('use_ner_features', False) else None,
+        ner_word_tokenizer_path=model_config.get('ner_word_tokenizer_path') if model_config.get('use_ner_features', False) else None,
+        ner_tag_vocab_path=model_config.get('ner_tag_vocab_path') if model_config.get('use_ner_features', False) else None,
+        ner_max_seq_length=model_config.get('ner_max_seq_length', 128)
     )
     if model_type == 'ate':
         print("Evaluating Aspect Term Extraction model...")

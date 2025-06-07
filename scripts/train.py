@@ -75,16 +75,27 @@ def setup_device() -> torch.device:
 def prepare_data(config: Dict[str, Any], data_dir: str) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Prepare data loaders for training, validation, and testing."""
     logging.info("Preparing data...")
-    
-    # Map config['model']['task'] to ABSAPreprocessor's 'task' argument
+      # Map config['model']['task'] to ABSAPreprocessor's 'task' argument
     task_map = {
         "token_classification": "ate",
         "sequence_classification": "asc",
         "absa_end_to_end": "end_to_end"
     }
+    
+    # Get NER configuration if available
+    model_config = config.get('model', {})
+    ner_model_path = model_config.get('ner_model_path') if model_config.get('use_ner_features', False) else None
+    ner_word_tokenizer_path = model_config.get('ner_word_tokenizer_path') if model_config.get('use_ner_features', False) else None
+    ner_tag_vocab_path = model_config.get('ner_tag_vocab_path') if model_config.get('use_ner_features', False) else None
+    ner_max_seq_length = model_config.get('ner_max_seq_length', 128)
+    
     preprocessor = ABSAPreprocessor(
         task=task_map.get(config['model']['task'], "ate"),
-        tokenizer_name=config['model']['name']
+        tokenizer_name=config['model']['name'],
+        ner_model_path=ner_model_path,
+        ner_word_tokenizer_path=ner_word_tokenizer_path,
+        ner_tag_vocab_path=ner_tag_vocab_path,
+        ner_max_seq_length=ner_max_seq_length
     )
     
     # Load and preprocess data based on task

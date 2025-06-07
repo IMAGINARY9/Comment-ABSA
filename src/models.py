@@ -32,11 +32,20 @@ class DeBERTaATE(nn.Module):
     B-OP, I-OP: Beginning/Inside opinion terms  
     O: Outside any term
     """
-    
     def __init__(self, config: Dict):
         super().__init__()
         self.config = config
         self.num_labels = config['model']['num_labels']
+        
+        # NER integration parameters
+        self.use_ner_features = config['model'].get('use_ner_features', False)
+        if self.use_ner_features:
+            self.ner_embedding_dim = config['model'].get('ner_embedding_dim', 64)
+            self.combine_ner_method = config['model'].get('combine_ner_method', 'concatenate')
+            # Load NER tag vocabulary size from config or default to 19 (from our NER model)
+            self.ner_vocab_size = config['model'].get('ner_vocab_size', 19)
+            # NER tag embeddings
+            self.ner_embedding = nn.Embedding(self.ner_vocab_size, self.ner_embedding_dim, padding_idx=0)
         
         # Load DeBERTa model
         model_name = config['model']['name']
@@ -49,7 +58,18 @@ class DeBERTaATE(nn.Module):
         else:
             self.deberta_config = AutoConfig.from_pretrained(model_name)
             self.deberta = AutoModel.from_pretrained(model_name, config=self.deberta_config)
-            self.classifier = nn.Linear(self.deberta.config.hidden_size, self.num_labels)
+            
+            # Adjust classifier input size based on NER integration method
+            classifier_input_size = self.deberta.config.hidden_size
+            if self.use_ner_features:
+                if self.combine_ner_method == 'concatenate':
+                    classifier_input_size += self.ner_embedding_dim
+                elif self.combine_ner_method == 'gate':
+                    # Gating mechanism: combine via learned gates
+                    self.ner_gate = nn.Linear(self.deberta.config.hidden_size + self.ner_embedding_dim, 1)
+            
+            self.classifier = nn.Linear(classifier_input_size, self.num_labels)
+        
         self.dropout = nn.Dropout(config['model']['dropout'])
         
         # Optional CRF layer for sequence labeling
@@ -76,15 +96,17 @@ class DeBERTaATE(nn.Module):
             inference_mode=False,
             r=lora_config['r'],
             lora_alpha=lora_config['lora_alpha'],
-            lora_dropout=lora_config['lora_dropout'],
+            lora_dropout=lora_config['lora_dropout'],            
             target_modules=lora_config['target_modules']
         )
         self.deberta = get_peft_model(self.deberta, peft_config)
     
-    def forward(self, input_ids, attention_mask=None, labels=None):
+    def forward(self, input_ids, attention_mask=None, labels=None, ner_tags=None):
         """Forward pass."""
         if self.classifier is None:
             # LoRA/PEFT: use built-in classifier and pass labels
+            # Note: Built-in classifiers don't support NER features out of the box
+            # This would require custom modifications to the transformer model
             outputs = self.deberta(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -99,7 +121,35 @@ class DeBERTaATE(nn.Module):
             )
             sequence_output = outputs.last_hidden_state
             sequence_output = self.dropout(sequence_output)
-            logits = self.classifier(sequence_output)
+              # Integrate NER features if available
+            if self.use_ner_features and ner_tags is not None:
+                # Handle padding values (-100) in NER tags
+                # Replace -100 with 0 (which should be the padding_idx)
+                masked_ner_tags = torch.where(ner_tags == -100, 0, ner_tags)
+                
+                # Convert NER tags to embeddings
+                ner_embeddings = self.ner_embedding(masked_ner_tags)  # [batch_size, seq_len, ner_embedding_dim]
+                
+                if self.combine_ner_method == 'concatenate':
+                    # Concatenate DeBERTa and NER embeddings
+                    combined_output = torch.cat([sequence_output, ner_embeddings], dim=-1)
+                elif self.combine_ner_method == 'add':
+                    # Add NER embeddings to DeBERTa output (requires projection)
+                    if not hasattr(self, 'ner_projection'):
+                        self.ner_projection = nn.Linear(self.ner_embedding_dim, self.deberta.config.hidden_size).to(sequence_output.device)
+                    projected_ner = self.ner_projection(ner_embeddings)
+                    combined_output = sequence_output + projected_ner
+                elif self.combine_ner_method == 'gate':
+                    # Use gating mechanism to combine features
+                    concat_features = torch.cat([sequence_output, ner_embeddings], dim=-1)
+                    gate_weights = torch.sigmoid(self.ner_gate(concat_features))
+                    combined_output = gate_weights * sequence_output + (1 - gate_weights) * ner_embeddings
+                else:
+                    combined_output = sequence_output
+            else:
+                combined_output = sequence_output
+            
+            logits = self.classifier(combined_output)
             loss = None
             if labels is not None:
                 if self.use_crf:

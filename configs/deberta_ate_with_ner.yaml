@@ -1,0 +1,72 @@
+# DeBERTa ATE Configuration with NER Integration
+# Configuration for Aspect Term Extraction using DeBERTa with NER features
+
+model:
+  name: "microsoft/deberta-v3-base"
+  type: "ate"
+  task: "token_classification"
+  architecture: "deberta"
+  num_labels: 5  # B-ASP, I-ASP, B-OP, I-OP, O
+  dropout: 0.1
+  
+  # NER Integration
+  use_ner_features: true
+  ner_model_path: "models/ner/ner_model_final_20250520-204254.keras"
+  ner_word_tokenizer_path: "models/ner/ner_artifacts/word_vocab.json"
+  ner_tag_vocab_path: "models/ner/ner_artifacts/tag_vocab.json"
+  ner_max_seq_length: 128
+  
+  # Model architecture parameters for NER integration
+  combine_ner_method: "concatenate"  # Options: concatenate, add, gate
+  ner_embedding_dim: 64  # Dimension for NER tag embeddings
+
+data:
+  max_seq_length: 128
+  train_batch_size: 16
+  eval_batch_size: 32
+  train_size: 0.7
+  val_size: 0.15
+  test_size: 0.15
+
+training:
+  num_epochs: 10
+  batch_size: 16
+  learning_rate: 2e-5
+  weight_decay: 0.01
+  warmup_steps: 500
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  save_steps: 500
+  eval_steps: 500
+  logging_steps: 100
+  
+  # Early stopping
+  early_stopping_patience: 3
+  early_stopping_threshold: 0.001
+
+optimizer:
+  type: "adamw"
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+scheduler:
+  type: "linear"
+  warmup_ratio: 0.1
+
+evaluation:
+  metrics: ["precision", "recall", "f1", "accuracy"]
+  average: "weighted"
+
+logging:
+  level: "INFO"
+  log_predictions: true
+  wandb:
+    enabled: false
+    project: "comment-absa-ner"
+    run_name: "deberta-ate-ner"
+
+paths:
+  model_output_dir: "models/ate_with_ner"
+  cache_dir: "cache"
+  logs_dir: "logs"
+  reports_dir: "reports"
